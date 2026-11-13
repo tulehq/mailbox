@@ -122,14 +122,16 @@ func (m *Module) bulkTemplate(
 	if err != nil {
 		return "", content, err
 	}
-	if err = m.checkIdentityARNs(ctx, env); err != nil {
-		return "", content, err
-	}
-	if err = m.authz.Authorize(ctx, authz.Target{
+	target := authz.Target{
 		Sender:           env.fromAddress,
+		Feedback:         env.feedbackAddress,
 		ConfigurationSet: env.configSet,
 		Template:         name,
-	}); err != nil {
+	}
+	if err = m.chooseIdentities(ctx, env, &target); err != nil {
+		return "", content, err
+	}
+	if err = m.authz.Authorize(ctx, target); err != nil {
 		return "", content, err
 	}
 	if name != "" {

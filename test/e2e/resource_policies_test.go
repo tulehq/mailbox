@@ -289,3 +289,46 @@ func TestARawMessagesIdentityARNHeaders(t *testing.T) {
 		rawInput("From: a@example.com\r\nX-SES-FROM-ARN: arn:aws:ses:"+region+
 			":111111111111:identity/example.com\r\n"))))
 }
+
+func TestADelegatesARNsChooseTheIdentitiesEvaluated(t *testing.T) {
+	s := startCrossStack(t)
+	s.createIdentity(t, "example.com")
+	s.putPolicy(t, "example.com", "member", policyDoc(
+		grantSend("Allow", "example.com", s.member)))
+	key := createUserKey(t, s.memberIAM, "delegate")
+	putUserPolicy(t, s.memberIAM, "delegate", allowPolicy("ses:SendEmail"))
+	c := sesClientWith(s.srv, key)
+	delegateARN := "arn:aws:iam::" + s.member + ":user/delegate"
+	from := func(address, identity string) *sesv2.SendEmailInput {
+		in := simpleInput(address, "Delegated", "Body.", "to@example.com")
+		in.FromEmailAddressIdentityArn = aws.String(sesARN("identity/" + identity))
+		return in
+	}
+
+	t.Run("an ARN chooses the identity whose policies apply", func(t *testing.T) {
+		// The address has an identity of its own, which grants nothing;
+		// the ARN chooses its domain's, which grants the member account.
+		s.createIdentity(t, "ops@example.com")
+		requireAccessDenied(t, errOf(c.SendEmail(t.Context(), simpleInput("ops@example.com",
+			"Denied", "Body.", "to@example.com"))), "User: "+delegateARN+" is not authorized "+
+			"to perform: ses:SendEmail on resource: "+sesARN("identity/ops@example.com")+
+			" because no resource-based policy allows the ses:SendEmail action")
+		send(t, c, from("ops@example.com", "example.com"))
+	})
+	t.Run("the feedback address's identity", func(t *testing.T) {
+		s.createIdentity(t, "bounces.example")
+		in := from("a@example.com", "example.com")
+		in.FeedbackForwardingEmailAddress = aws.String("fb@bounces.example")
+		requireAccessDenied(t, errOf(c.SendEmail(t.Context(), in)), "User: "+delegateARN+
+			" is not authorized to perform: ses:SendEmail on resource: "+
+			sesARN("identity/bounces.example")+" because no resource-based policy allows "+
+			"the ses:SendEmail action")
+		s.putPolicy(t, "bounces.example", "member", policyDoc(
+			grantSend("Allow", "bounces.example", s.member)))
+		in.FeedbackForwardingEmailAddressIdentityArn = aws.String(
+			sesARN("identity/bounces.example"))
+		send(t, c, in)
+		in.FeedbackForwardingEmailAddressIdentityArn = aws.String(sesARN("identity/example.com"))
+		requireAs[*types.BadRequestException](t, errOf(c.SendEmail(t.Context(), in)))
+	})
+}

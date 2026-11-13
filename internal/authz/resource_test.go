@@ -180,53 +180,123 @@ func TestAStoredPolicyThatDoesNotParseFailsClosed(t *testing.T) {
 	}
 }
 
-func TestIdentityARNsMustNameTheSendersIdentity(t *testing.T) {
-	a := New(&store{policies: map[string][]string{
-		"example.com": nil, "ops@example.com": nil,
-	}}, testAccount, testRegion)
-	for _, tc := range []struct {
-		name, arn, address string
-		status             int
-	}{
-		{"the domain", sesARN("identity/example.com"), "a@example.com", http.StatusOK},
+// arnCase is an ARN given for an address, and the identity it chooses or
+// the status it is refused with.
+type arnCase struct {
+	name, arn, address, want string
+	status                   int
+}
+
+func arnCases() []arnCase {
+	return []arnCase{
+		{"the domain", sesARN("identity/example.com"), "a@example.com", "example.com", 0},
 		{
 			"the domain in another case", sesARN("identity/Example.COM"), "a@example.com",
-			http.StatusOK,
+			"example.com", 0,
 		},
 		{
 			"the address identity", sesARN("identity/ops@example.com"), "ops@example.com",
-			http.StatusOK,
+			"ops@example.com", 0,
 		},
 		{
-			"a domain the address identity overrides", sesARN("identity/example.com"),
-			"ops@example.com", http.StatusBadRequest,
+			"the domain of an address with an identity", sesARN("identity/example.com"),
+			"ops@example.com", "example.com", 0,
 		},
 		{
-			"another identity", sesARN("identity/other.example"), "a@example.com",
+			"a parent domain", sesARN("identity/example.com"), "a@mail.example.com",
+			"example.com", 0,
+		},
+		{
+			"an address identity that does not exist", sesARN("identity/a@example.com"),
+			"a@example.com", "", http.StatusNotFound,
+		},
+		{
+			"a subdomain that does not exist", sesARN("identity/mail.example.com"),
+			"a@mail.example.com", "", http.StatusNotFound,
+		},
+		{
+			"an identity that does not cover the address", sesARN("identity/other.example"),
+			"a@example.com", "", http.StatusBadRequest,
+		},
+		{
+			"a subdomain of the address's domain", sesARN("identity/mail.example.com"),
+			"a@example.com", "", http.StatusBadRequest,
+		},
+		{
+			"not an identity ARN", sesARN("template/t"), "a@example.com", "",
 			http.StatusBadRequest,
 		},
-		{"not an identity ARN", sesARN("template/t"), "a@example.com", http.StatusBadRequest},
-		{"not an ARN", "example.com", "a@example.com", http.StatusBadRequest},
+		{"not an ARN", "example.com", "a@example.com", "", http.StatusBadRequest},
 		{"another account", "arn:aws:ses:" + testRegion + ":" + otherAccount +
-			":identity/example.com", "a@example.com", http.StatusNotFound},
+			":identity/example.com", "a@example.com", "", http.StatusNotFound},
 		{
 			"another region", "arn:aws:ses:us-west-2:" + testAccount + ":identity/example.com",
-			"a@example.com", http.StatusNotFound,
+			"a@example.com", "", http.StatusNotFound,
 		},
-	} {
+	}
+}
+
+func TestIdentityARNsChooseAnIdentityThatCoversTheAddress(t *testing.T) {
+	a := New(&store{policies: map[string][]string{
+		"example.com": nil, "ops@example.com": nil,
+	}}, testAccount, testRegion)
+	for _, tc := range arnCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			err := a.CheckIdentityARN(t.Context(), "FromEmailAddressIdentityArn", tc.arn,
+			got, err := a.IdentityFromARN(t.Context(), "FromEmailAddressIdentityArn", tc.arn,
 				tc.address)
-			if tc.status == http.StatusOK {
-				if err != nil {
-					t.Fatalf("refused: %v", err)
+			if tc.status == 0 {
+				if err != nil || got != tc.want {
+					t.Fatalf("got %q, %v; want %q", got, err, tc.want)
 				}
 				return
 			}
-			e := sesapi.ToError(t.Context(), err)
-			if e.Status != tc.status {
+			if e := sesapi.ToError(t.Context(), err); e.Status != tc.status {
 				t.Fatalf("got %v, want status %d", err, tc.status)
 			}
 		})
 	}
+}
+
+func TestTheChosenIdentityIsTheOneEvaluated(t *testing.T) {
+	// The address has an identity of its own, which grants nothing; the
+	// domain's policy grants the delegate.
+	st := &store{policies: map[string][]string{
+		"example.com": {grant("Allow", otherAccount)},
+		"ops@example.com": {string(doc(`{"Effect":"Allow","Principal":{"AWS":"111111111111"},` +
+			`"Action":"ses:SendEmail","Resource":"` + sesARN("identity/ops@example.com") + `"}`))},
+	}}
+	h := newHarness(t, "SendEmail", keys{"KEY": delegate(allowSend)}, st)
+	h.target = Target{Sender: "ops@example.com"}
+	status, e := h.call("KEY")
+	requireDenied(t, status, e, deniedAs(otherUserARN, "ses:SendEmail",
+		sesARN("identity/ops@example.com"),
+		"because no resource-based policy allows the ses:SendEmail action"))
+	h.target = Target{Sender: "ops@example.com", SenderIdentityName: "example.com"}
+	if status, e = h.call("KEY"); status != http.StatusOK {
+		t.Fatalf("through the domain: %d %+v", status, e)
+	}
+}
+
+func TestTheFeedbackAddressIsEvaluatedOnItsIdentity(t *testing.T) {
+	st := &store{policies: map[string][]string{
+		"example.com":     {grant("Allow", otherAccount)},
+		"bounces.example": nil,
+	}}
+	h := newHarness(t, "SendEmail", keys{"KEY": delegate(allowSend)}, st)
+	h.target = Target{Sender: "a@example.com", Feedback: "fb@example.com"}
+	if status, e := h.call("KEY"); status != http.StatusOK {
+		t.Fatalf("a feedback address of the granted identity: %d %+v", status, e)
+	}
+	h.target = Target{Sender: "a@example.com", Feedback: "fb@bounces.example"}
+	status, e := h.call("KEY")
+	requireDenied(t, status, e, deniedAs(otherUserARN, "ses:SendEmail",
+		sesARN("identity/bounces.example"),
+		"because no resource-based policy allows the ses:SendEmail action"))
+
+	// Within the account the identity policy must allow it too.
+	h = newHarness(t, "SendEmail", keys{"KEY": user(doc(`{"Effect":"Allow",` +
+		`"Action":"ses:SendEmail","Resource":"` + sesARN("identity/example.com") + `"}`))}, st)
+	h.target = Target{Sender: "a@example.com", Feedback: "fb@bounces.example"}
+	status, e = h.call("KEY")
+	requireDenied(t, status, e, notAllowed("ses:SendEmail", sesARN("identity/bounces.example")))
 }
