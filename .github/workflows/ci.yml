@@ -29,19 +29,19 @@ jobs:
 
       # The cross-service end-to-end tests build and run the identity and
       # accounts services from their source. They run against released
-      # versions, not the main branches: identity's latest release, and the
-      # accounts release identity's own CI runs against. Move the pins when
-      # they release.
+      # versions, not the main branches: identity's latest release, and
+      # accounts' latest, which the organization-key tests run against.
+      # Move the pins when they release.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tulehq/identity
-          ref: v0.4.0
+          ref: v0.5.0
           path: identity
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: tulehq/accounts
-          ref: v0.1.1
+          ref: v0.4.0
           path: accounts
 
       - name: End-to-end tests
