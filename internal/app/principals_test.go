@@ -347,9 +347,9 @@ func TestAPolicyNamingAUserNoOneHasIsRefused(t *testing.T) {
 
 // TestAnUnauthorizedWriteLearnsNothingOfThePrincipals answers a caller
 // that may not write the policy with AccessDenied, whether or not the
-// users it names exist.
+// users it names exist, without asking identity to bind them.
 func TestAnUnauthorizedWriteLearnsNothingOfThePrincipals(t *testing.T) {
-	_, _, srv, _ := startBoundApp(t)
+	f, _, srv, _ := startBoundApp(t)
 	plain := sesv2.New(sesv2.Options{
 		Region:           "us-east-1",
 		BaseEndpoint:     aws.String(srv.URL),
@@ -364,6 +364,9 @@ func TestAnUnauthorizedWriteLearnsNothingOfThePrincipals(t *testing.T) {
 				Policy: aws.String(grantPolicy("Send", principal)),
 			})
 		requireAPIError(t, err, "AccessDeniedException", http.StatusForbidden)
+	}
+	if n := f.binds.Load(); n != 0 {
+		t.Fatalf("a denied caller made %d bind calls to identity, want 0", n)
 	}
 }
 
