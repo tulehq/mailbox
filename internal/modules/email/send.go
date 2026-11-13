@@ -9,20 +9,28 @@ import (
 
 	"github.com/gasmod/gas"
 
+	"tule.dev/mailbox/internal/authz"
 	"tule.dev/mailbox/internal/contracts"
 	"tule.dev/mailbox/internal/mailmime"
 	"tule.dev/mailbox/internal/render"
 	"tule.dev/mailbox/internal/sesapi"
 )
 
-// envelope is what every message of one send shares.
+// envelope is what every message of one send shares. fromAddress and
+// fromName are the bare address and the display name of from, and
+// feedbackAddress the bare address of feedback. headerFrom is a raw
+// message's From header when the request gives FromEmailAddress as well: a
+// second sender the send is authorized for.
 type envelope struct {
-	from        string
-	fromAddress string
-	feedback    string
-	configSet   string
-	replyTo     []string
-	tags        []contracts.MessageTag
+	headerFrom      *mail.Address
+	from            string
+	fromAddress     string
+	fromName        string
+	feedback        string
+	feedbackAddress string
+	configSet       string
+	replyTo         []string
+	tags            []contracts.MessageTag
 }
 
 // envelopeOf checks the sender, reply-to and feedback addresses, and the
@@ -46,14 +54,22 @@ func envelopeOf(
 			return env, err
 		}
 		env.from, env.fromAddress = *from, a
+		// sesapi.Address has parsed it already, the same way.
+		parsed, pErr := mail.ParseAddress(*from)
+		if pErr != nil {
+			return env, fmt.Errorf("email: parse a checked address: %w", pErr)
+		}
+		env.fromName = parsed.Name
 	}
 	if _, err := sesapi.Addresses("ReplyToAddresses", replyTo); err != nil {
 		return env, err
 	}
 	if feedback != nil {
-		if _, err := sesapi.Address("FeedbackForwardingEmailAddress", *feedback); err != nil {
+		a, err := sesapi.Address("FeedbackForwardingEmailAddress", *feedback)
+		if err != nil {
 			return env, err
 		}
+		env.feedbackAddress = a
 	}
 	var err error
 	env.tags, err = messageTags(tagsField, tags)
@@ -161,11 +177,11 @@ func (m *Module) message(
 ) (*contracts.Message, error) {
 	switch {
 	case c.Simple != nil:
-		return m.simple(env, dest, c.Simple, now, id)
+		return m.simple(ctx, env, dest, c.Simple, now, id)
 	case c.Template != nil:
 		return m.templated(ctx, env, dest, c.Template, now, id)
 	default:
-		return m.raw(env, dest, c.Raw, now, id)
+		return m.raw(ctx, env, dest, c.Raw, now, id)
 	}
 }
 
@@ -180,6 +196,7 @@ func kinds(c *sesapi.EmailContent) int {
 }
 
 func (m *Module) simple(
+	ctx gas.Context,
 	env envelope,
 	dest *sesapi.Destination,
 	s *sesapi.Message,
@@ -196,6 +213,9 @@ func (m *Module) simple(
 	if err != nil {
 		return nil, err
 	}
+	if err = m.authorizeSend(ctx, env, rcpt, ""); err != nil {
+		return nil, err
+	}
 	msg := baseMessage(env, rcpt, now, id, s.Headers, s.Attachments)
 	msg.Subject = text(s.Subject)
 	if s.Body.Text != nil {
@@ -207,6 +227,29 @@ func (m *Module) simple(
 		msg.HTML = &h
 	}
 	return build(contracts.KindSimple, env, rcpt, msg)
+}
+
+// authorizeSend authorizes a SendEmail from env to rcpt, through the stored
+// template named template, if any, once every member it is evaluated on has
+// been checked.
+func (m *Module) authorizeSend(
+	ctx gas.Context,
+	env envelope,
+	rcpt recipients,
+	template string,
+) error {
+	t := authz.Target{
+		Sender:            env.fromAddress,
+		SenderDisplayName: env.fromName,
+		Feedback:          env.feedbackAddress,
+		ConfigurationSet:  env.configSet,
+		Template:          template,
+		Recipients:        rcpt.addresses,
+	}
+	if env.headerFrom != nil {
+		t.HeaderSender, t.HeaderSenderDisplayName = env.headerFrom.Address, env.headerFrom.Name
+	}
+	return m.authz.Authorize(ctx, t)
 }
 
 // checkSend checks what Simple and Template content share: a sender, the
@@ -361,7 +404,7 @@ func (m *Module) templated(
 	now time.Time,
 	id string,
 ) (*contracts.Message, error) {
-	name, content, err := m.resolveTemplate(ctx, t)
+	name, content, err := m.templateSource(t)
 	if err != nil {
 		return nil, err
 	}
@@ -372,6 +415,14 @@ func (m *Module) templated(
 	data := templateData(t.TemplateData)
 	if err = checkTemplateData(data); err != nil {
 		return nil, err
+	}
+	if err = m.authorizeSend(ctx, env, rcpt, name); err != nil {
+		return nil, err
+	}
+	if name != "" {
+		if content, err = m.storedTemplate(ctx, name); err != nil {
+			return nil, err
+		}
 	}
 	return renderMessage(env, rcpt, rendering{
 		template: name, content: content, data: data,
@@ -435,12 +486,11 @@ func renderMessage(
 	return build(contracts.KindTemplate, env, rcpt, msg)
 }
 
-// resolveTemplate returns the name and content of Template content: given
-// inline, with no name, or the stored template it names by name or ARN.
-func (m *Module) resolveTemplate(
-	ctx gas.Context,
-	t *sesapi.Template,
-) (string, contracts.TemplateContent, error) {
+// templateSource returns where Template content's template comes from:
+// content given inline, with no name, or the name of the stored template it
+// names by name or ARN, whose content storedTemplate fetches once the send
+// is authorized.
+func (m *Module) templateSource(t *sesapi.Template) (string, contracts.TemplateContent, error) {
 	if t.TemplateContent != nil {
 		if t.TemplateName != nil || t.TemplateArn != nil {
 			return "", contracts.TemplateContent{}, sesapi.ErrBadRequest(
@@ -449,40 +499,57 @@ func (m *Module) resolveTemplate(
 		content, err := templateContent(t.TemplateContent)
 		return "", content, err
 	}
-	name, err := templateName(t)
-	if err != nil {
-		return "", contracts.TemplateContent{}, err
-	}
+	name, err := templateName(t, m.authz.ARNPrefix()+"template/")
+	return name, contracts.TemplateContent{}, err
+}
+
+// storedTemplate returns the content of the stored template name.
+func (m *Module) storedTemplate(ctx gas.Context, name string) (contracts.TemplateContent, error) {
 	tmpl, err := m.store.GetTemplate(ctx, name)
 	if err != nil {
-		return "", contracts.TemplateContent{}, templateNotFound(err, name)
+		return contracts.TemplateContent{}, templateNotFound(err, name)
 	}
-	return name, tmpl.Content, nil
+	return tmpl.Content, nil
 }
 
 // templateName is the name of the stored template Template content names,
-// by its TemplateName or, without one, by its TemplateArn.
-func templateName(t *sesapi.Template) (string, error) {
+// by its TemplateName or, without one, by its TemplateArn. prefix is the
+// start of the ARNs of the templates the request can reach, those of the
+// service's account in the request's region: an ARN of a template anywhere
+// else names none of them, and is answered as a template that does not
+// exist. A string that is not an SES template ARN is invalid.
+func templateName(t *sesapi.Template, prefix string) (string, error) {
 	switch {
 	case t.TemplateName != nil && *t.TemplateName != "":
 		return *t.TemplateName, nil
 	case t.TemplateArn != nil && *t.TemplateArn != "":
-		_, name, ok := strings.Cut(*t.TemplateArn, ":template/")
-		if !ok || name == "" {
-			return "", sesapi.ErrBadRequest(fmt.Sprintf("Invalid TemplateArn: %s",
-				*t.TemplateArn))
-		}
-		return name, nil
+		return templateARNName(*t.TemplateArn, prefix)
 	default:
 		return "", sesapi.ErrBadRequest(
 			"You must specify a TemplateName, a TemplateArn or the TemplateContent.")
 	}
 }
 
+// templateARNName is the name of the template an ARN names, as templateName
+// describes.
+func templateARNName(arn, prefix string) (string, error) {
+	parts := strings.SplitN(arn, ":", 6)
+	if len(parts) != 6 || parts[0] != "arn" || parts[2] != "ses" ||
+		!strings.HasPrefix(parts[5], "template/") || parts[5] == "template/" {
+		return "", sesapi.ErrBadRequest(fmt.Sprintf("Invalid TemplateArn: %s", arn))
+	}
+	name := strings.TrimPrefix(parts[5], "template/")
+	if !strings.HasPrefix(arn, prefix) {
+		return "", sesapi.ErrNotFound(fmt.Sprintf("Template %s does not exist.", name))
+	}
+	return name, nil
+}
+
 // raw prepares Raw content as SES sends it. The sender, recipients,
 // configuration set and tags the request gives take precedence over the
 // message's own From, To, Cc and Bcc headers and its X-SES headers.
 func (m *Module) raw(
+	ctx gas.Context,
 	env envelope,
 	dest *sesapi.Destination,
 	r *sesapi.RawMessage,
@@ -497,38 +564,58 @@ func (m *Module) raw(
 		return nil, sesapi.ErrMessageRejected(err.Error())
 	}
 
-	if env.from == "" {
-		if env.from, env.fromAddress, err = rawSender(prepared.From); err != nil {
-			return nil, err
-		}
+	if env, err = rawEnvelope(env, prepared); err != nil {
+		return nil, err
 	}
 	rcpt, err := rawRecipients(dest, prepared)
 	if err != nil {
 		return nil, err
+	}
+	if err = m.authorizeSend(ctx, env, rcpt, ""); err != nil {
+		return nil, err
+	}
+	return stored(contracts.KindRaw, env, rcpt, prepared.MIME, now, id)
+}
+
+// rawEnvelope fills in what the request leaves out of env from the raw
+// message: its sender, configuration set and tags.
+func rawEnvelope(env envelope, prepared *mailmime.Raw) (envelope, error) {
+	var err error
+	switch {
+	case env.from == "":
+		if env.from, env.fromAddress, env.fromName, err = rawSender(prepared.From); err != nil {
+			return env, err
+		}
+	case prepared.From != "":
+		// The header reaches the recipients as written, so its sender is
+		// authorized as well as FromEmailAddress.
+		if env.headerFrom, err = headerAddress(prepared.From); err != nil {
+			return env, err
+		}
 	}
 	if env.configSet == "" {
 		env.configSet = prepared.ConfigurationSet
 	}
 	if len(env.tags) == 0 && prepared.Tags != "" {
 		if env.tags, err = headerTags(prepared.Tags); err != nil {
-			return nil, err
+			return env, err
 		}
 	}
-	return stored(contracts.KindRaw, env, rcpt, prepared.MIME, now, id)
+	return env, nil
 }
 
 // rawSender is the sender of a raw message sent without FromEmailAddress:
-// its From header, as written, and that header's address.
-func rawSender(from string) (string, string, error) {
+// its From header, as written, and that header's address and display name.
+func rawSender(from string) (string, string, string, error) {
 	if from == "" {
-		return "", "", sesapi.ErrBadRequest(
+		return "", "", "", sesapi.ErrBadRequest(
 			"You must specify a FromEmailAddress or a From header in the raw message.")
 	}
 	a, err := headerAddress(from)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return from, a.Address, nil
+	return from, a.Address, a.Name, nil
 }
 
 // rawRecipients are the destination's addresses when it has any, and

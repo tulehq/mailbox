@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gasmod/gas"
 
+	"tule.dev/mailbox/internal/authz"
 	"tule.dev/mailbox/internal/contracts"
 	"tule.dev/mailbox/internal/sesapi"
 )
@@ -21,13 +23,21 @@ const moduleName = "tule/modules/email"
 type Module struct {
 	router *gas.Router
 	store  contracts.MailboxProvider
+	authz  *authz.Authorizer
 	now    func() time.Time
+	// resources orders the operations on identities and templates; see
+	// serve.
+	resources sync.RWMutex
 }
 
-// NewModule returns a Module serving from store. It registers its routes
-// when the app initializes it.
-func NewModule(router *gas.Router, store contracts.MailboxProvider) *Module {
-	return &Module{router: router, store: store, now: time.Now}
+// NewModule returns a Module serving from store, its requests authorized by
+// az. It registers its routes when the app initializes it.
+func NewModule(
+	router *gas.Router,
+	store contracts.MailboxProvider,
+	az *authz.Authorizer,
+) *Module {
+	return &Module{router: router, store: store, authz: az, now: time.Now}
 }
 
 // Name identifies the module to gas.
@@ -40,33 +50,46 @@ func (m *Module) Name() string {
 type handler func(gas.Context) error
 
 // Init registers the module's routes, the paths and methods of the SES v2
-// API model.
+// API model, each guarded by its authorization entry.
 func (m *Module) Init(context.Context) error {
 	routes := []struct {
 		h      handler
 		method string
 		path   string
+		// writes marks an operation that creates, changes or deletes an
+		// identity or a template.
+		writes bool
 	}{
-		{m.sendEmail, http.MethodPost, "/v2/email/outbound-emails"},
-		{m.sendBulkEmail, http.MethodPost, "/v2/email/outbound-bulk-emails"},
-		{m.createEmailIdentity, http.MethodPost, "/v2/email/identities"},
+		{m.sendEmail, http.MethodPost, "/v2/email/outbound-emails", false},
+		{m.sendBulkEmail, http.MethodPost, "/v2/email/outbound-bulk-emails", false},
+		{m.createEmailIdentity, http.MethodPost, "/v2/email/identities", true},
 		// The SDK model binds ListEmailIdentities to POST /list-identities
 		// with a body; the botocore model the AWS CLI reads still binds it to
 		// GET /identities with a query. Both are served.
-		{m.listEmailIdentities, http.MethodPost, "/v2/email/list-identities"},
-		{m.listEmailIdentitiesByQuery, http.MethodGet, "/v2/email/identities"},
-		{m.getEmailIdentity, http.MethodGet, "/v2/email/identities/{EmailIdentity}"},
-		{m.deleteEmailIdentity, http.MethodDelete, "/v2/email/identities/{EmailIdentity}"},
-		{m.createEmailTemplate, http.MethodPost, "/v2/email/templates"},
-		{m.listEmailTemplates, http.MethodGet, "/v2/email/templates"},
-		{m.getEmailTemplate, http.MethodGet, "/v2/email/templates/{TemplateName}"},
-		{m.updateEmailTemplate, http.MethodPut, "/v2/email/templates/{TemplateName}"},
-		{m.deleteEmailTemplate, http.MethodDelete, "/v2/email/templates/{TemplateName}"},
-		{m.testRenderEmailTemplate, http.MethodPost, "/v2/email/templates/{TemplateName}/render"},
-		{m.getAccount, http.MethodGet, "/v2/email/account"},
+		{m.listEmailIdentities, http.MethodPost, "/v2/email/list-identities", false},
+		{m.listEmailIdentitiesByQuery, http.MethodGet, "/v2/email/identities", false},
+		{m.getEmailIdentity, http.MethodGet, "/v2/email/identities/{EmailIdentity}", false},
+		{m.deleteEmailIdentity, http.MethodDelete, "/v2/email/identities/{EmailIdentity}", true},
+		{m.createEmailTemplate, http.MethodPost, "/v2/email/templates", true},
+		{m.listEmailTemplates, http.MethodGet, "/v2/email/templates", false},
+		{m.getEmailTemplate, http.MethodGet, "/v2/email/templates/{TemplateName}", false},
+		{m.updateEmailTemplate, http.MethodPut, "/v2/email/templates/{TemplateName}", true},
+		{m.deleteEmailTemplate, http.MethodDelete, "/v2/email/templates/{TemplateName}", true},
+		{
+			m.testRenderEmailTemplate,
+			http.MethodPost,
+			"/v2/email/templates/{TemplateName}/render",
+			false,
+		},
+		{m.getAccount, http.MethodGet, "/v2/email/account", false},
 	}
 	for _, r := range routes {
-		m.router.Handle(m, r.method, r.path, serve(r.h))
+		op, ok := authz.Lookup(r.method, r.path)
+		if !ok {
+			return fmt.Errorf("email: %s %s has no authorization entry", r.method, r.path)
+		}
+		m.router.Handle(m, r.method, r.path, m.serve(r.h, r.writes),
+			gas.MiddlewareFuncWithName("authz "+op.Name, m.authz.Guard(op)))
 	}
 	return nil
 }
@@ -76,8 +99,21 @@ func (m *Module) Close(context.Context) error {
 	return nil
 }
 
-func serve(h handler) func(gas.Context) error {
+// serve runs h under the resource lock: shared, or exclusive for an
+// operation that writes an identity or a template. An operation is
+// authorized on the identities and templates it looks up, and then acts on
+// them; holding the lock from one to the other keeps a concurrent create or
+// delete from making it act on a resource other than the one evaluated.
+// Nothing changes a resource's tags, so they cannot go stale in between.
+func (m *Module) serve(h handler, writes bool) func(gas.Context) error {
 	return func(ctx gas.Context) error {
+		if writes {
+			m.resources.Lock()
+			defer m.resources.Unlock()
+		} else {
+			m.resources.RLock()
+			defer m.resources.RUnlock()
+		}
 		if err := h(ctx); err != nil {
 			return sesapi.WriteError(ctx, err)
 		}

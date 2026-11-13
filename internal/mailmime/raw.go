@@ -2,6 +2,7 @@ package mailmime
 
 import (
 	"bytes"
+	"errors"
 	"net/textproto"
 	"slices"
 	"strings"
@@ -31,6 +32,8 @@ type Raw struct {
 	ConfigurationSet string
 	Tags             string
 	MIME             []byte
+	// froms counts the From fields, of which SES takes one only.
+	froms int
 }
 
 // PrepareRaw checks msg is a message SES would send and applies what SES
@@ -40,6 +43,9 @@ type Raw struct {
 // message's own line ending.
 func PrepareRaw(msg []byte, messageID string, date time.Time) (*Raw, error) {
 	if err := checkLineLengths(msg); err != nil {
+		return nil, err
+	}
+	if err := checkHeaderBytes(msg); err != nil {
 		return nil, err
 	}
 	fields, body, err := splitHeader(msg)
@@ -58,6 +64,12 @@ func PrepareRaw(msg []byte, messageID string, date time.Time) (*Raw, error) {
 		if out.read(f) {
 			b.Write(f.raw)
 		}
+	}
+	// From is a field SES refuses to see twice. The sender a send is
+	// authorized for must be the one its recipients see, so a second From
+	// is refused here, before anything reads the first.
+	if out.froms > 1 {
+		return nil, errors.New("the message has more than one From header")
 	}
 	b.WriteString("Date: " + HeaderDate(date) + eol)
 	b.WriteString("Message-ID: " + HeaderMessageID(messageID) + eol)
@@ -80,6 +92,7 @@ func (r *Raw) read(f field) bool {
 	switch name {
 	case "From":
 		r.From = f.value
+		r.froms++
 	case "To":
 		r.To = joinList(r.To, f.value)
 	case "Cc":
@@ -89,11 +102,18 @@ func (r *Raw) read(f field) bool {
 		return false
 	case "Message-Id", "Date":
 		return false
+	// "If you include multiple instances of an X-header, Amazon SES uses only
+	// the first instance" (SES Developer Guide, Using sending authorization
+	// with Amazon SES, X-headers).
 	case headerConfigurationSet:
-		r.ConfigurationSet = f.value
+		if r.ConfigurationSet == "" {
+			r.ConfigurationSet = f.value
+		}
 		return false
 	case headerMessageTags:
-		r.Tags = f.value
+		if r.Tags == "" {
+			r.Tags = f.value
+		}
 		return false
 	}
 	return !slices.Contains(sesHeaders, name)

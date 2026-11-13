@@ -55,6 +55,7 @@ const (
 	TypeInvalidSignature   = "InvalidSignatureException"
 	TypeUnrecognizedClient = "UnrecognizedClientException"
 	TypeExpiredToken       = "ExpiredTokenException"
+	TypeAccessDenied       = "AccessDeniedException"
 )
 
 // ErrBadRequest is the error for input SES calls invalid.
@@ -77,6 +78,32 @@ func ErrMessageRejected(msg string) *Error {
 // fields have the wrong JSON types.
 func ErrSerialization(msg string) *Error {
 	return NewError(http.StatusBadRequest, TypeSerialization, msg)
+}
+
+// ErrNotAllowed is the AccessDeniedException of a request no identity-based
+// policy allows, in the form of AWS's messages. The SES v2 SDK model has no
+// AccessDeniedException; the SES v2 Common Errors page gives it, with 403.
+func ErrNotAllowed(callerARN, action, resource string) *Error {
+	return NewError(http.StatusForbidden, TypeAccessDenied, "User: "+callerARN+
+		" is not authorized to perform: "+action+" on resource: "+resource+
+		" because no identity-based policy allows the "+action+" action")
+}
+
+// ErrExplicitlyDenied is the AccessDeniedException of a request an
+// identity-based policy denies, in the form of AWS's messages.
+func ErrExplicitlyDenied(callerARN, action, resource string) *Error {
+	return NewError(http.StatusForbidden, TypeAccessDenied, "User: "+callerARN+
+		" is not authorized to perform: "+action+" on resource: "+resource+
+		" with an explicit deny in an identity-based policy")
+}
+
+// ErrNoResourcePolicy is the AccessDeniedException of a cross-account
+// request that its identity-based policies allow and no resource-based
+// policy does, in the form of AWS's messages.
+func ErrNoResourcePolicy(callerARN, action, resource string) *Error {
+	return NewError(http.StatusForbidden, TypeAccessDenied, "User: "+callerARN+
+		" is not authorized to perform: "+action+" on resource: "+resource+
+		" because no resource-based policy allows the "+action+" action")
 }
 
 // ErrUnknownOperation is the error for a path and method no operation of

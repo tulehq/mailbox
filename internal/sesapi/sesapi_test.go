@@ -214,3 +214,16 @@ func TestAttachmentFieldsGoSafelyIntoHeaders(t *testing.T) {
 		}
 	}
 }
+
+func TestTagsRefuseADuplicateKey(t *testing.T) {
+	// "For each associated resource, each tag key must be unique and it can
+	// have only one value" (the SDK model's Tag). SES's error for a
+	// duplicate is not documented; it is refused as invalid input, so no
+	// request carries two values of one tag key.
+	k, v1, v2 := "team", "mail", "web"
+	err := Tags([]Tag{{Key: &k, Value: &v1}, {Key: &k, Value: &v2}})
+	var e *Error
+	if !errors.As(err, &e) || e.Type != TypeBadRequest {
+		t.Fatalf("got %v, want BadRequestException", err)
+	}
+}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/gasmod/gas"
 
+	"tule.dev/mailbox/internal/authz"
 	"tule.dev/mailbox/internal/contracts"
 	"tule.dev/mailbox/internal/mailmime"
 	"tule.dev/mailbox/internal/sesapi"
@@ -91,10 +92,36 @@ func (m *Module) checkBulk(
 	if err = checkTemplateData(d.data); err != nil {
 		return nil, err
 	}
-	if d.name, d.content, err = m.resolveTemplate(ctx, t); err != nil {
+	if d.name, d.content, err = m.bulkTemplate(ctx, env, t); err != nil {
 		return nil, err
 	}
 	return d, nil
+}
+
+// bulkTemplate authorizes a SendBulkEmail and returns the name and content
+// of its template. The resources it is evaluated on are the request's,
+// shared by every entry: the reference lists no recipient or sender keys for
+// SendBulkEmail.
+func (m *Module) bulkTemplate(
+	ctx gas.Context,
+	env envelope,
+	t *sesapi.Template,
+) (string, contracts.TemplateContent, error) {
+	name, content, err := m.templateSource(t)
+	if err != nil {
+		return "", content, err
+	}
+	if err = m.authz.Authorize(ctx, authz.Target{
+		Sender:           env.fromAddress,
+		ConfigurationSet: env.configSet,
+		Template:         name,
+	}); err != nil {
+		return "", content, err
+	}
+	if name != "" {
+		content, err = m.storedTemplate(ctx, name)
+	}
+	return name, content, err
 }
 
 // entryOutcome is what one bulk entry produced: its result, and the message
