@@ -16,6 +16,7 @@ package authz
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -51,9 +52,11 @@ const apiVersion = "2"
 type Authorizer struct {
 	store    contracts.MailboxProvider
 	identity *policyCache
-	now      func() time.Time
-	account  string
-	region   string
+	// stored are the identities' sending authorization policies, parsed.
+	stored  *policyCache
+	now     func() time.Time
+	account string
+	region  string
 }
 
 // New returns an Authorizer for the service's account and region, whose
@@ -64,6 +67,7 @@ type Authorizer struct {
 func New(store contracts.MailboxProvider, account, region string) *Authorizer {
 	return &Authorizer{
 		store: store, identity: newPolicyCache(maxCachedPolicies, policy.ParseIdentity),
+		stored:  newPolicyCache(maxCachedPolicies, policy.ParseResource),
 		now:     time.Now,
 		account: account, region: region,
 	}
@@ -169,6 +173,12 @@ func (a *Authorizer) authorize(ctx context.Context, c *call, t Target) error {
 // account and across accounts (IAM User Guide, "Policy evaluation logic"
 // and "Cross-account policy evaluation logic").
 func (a *Authorizer) evaluate(ctx context.Context, c *call, t Target, p sigv4.Principal) error {
+	// policy.Authorize gives an Account caller the root's full identity
+	// access, which mailbox grants from Root: the two must agree.
+	if (p.Type == sigv4.PrincipalTypeAccount) != p.Root {
+		return fmt.Errorf("authz: principal %s has Root %t and type %q, which disagree",
+			p.ARN, p.Root, p.Type)
+	}
 	policies, err := a.identity.parse(p.Policies)
 	if err != nil {
 		return err
@@ -181,7 +191,7 @@ func (a *Authorizer) evaluate(ctx context.Context, c *call, t Target, p sigv4.Pr
 		// would be two values of one aws:RequestTag key.
 		return sesapi.ErrBadRequest(fmt.Sprintf("Duplicate tag key: %s", k))
 	}
-	resources, err := a.resources(ctx, c.op, t, a.ARNPrefix())
+	resources, err := a.resources(ctx, c.op, t, p.AccountID)
 	if err != nil {
 		return err
 	}
@@ -334,20 +344,22 @@ func (a *Authorizer) resources(
 	ctx context.Context,
 	op Operation,
 	t Target,
-	base string,
+	callerAccount string,
 ) ([]resource, error) {
 	if len(op.Resources) == 0 {
 		return []resource{{arn: "*", account: a.account}}, nil
 	}
 	out := make([]resource, 0, len(op.Resources))
 	for _, r := range op.Resources {
-		res, use, err := a.resolve(ctx, r, t, base)
+		res, use, err := a.resolve(ctx, r, t, callerAccount)
 		if err != nil {
 			return nil, fmt.Errorf("authz: %s: %w", op.Name, err)
 		}
 		if use {
-			// Every resource mailbox stores is the service account's.
-			res.account = a.account
+			if res.account == "" {
+				// Every resource mailbox stores is the service account's.
+				res.account = a.account
+			}
 			out = append(out, res)
 		}
 	}
@@ -360,8 +372,9 @@ func (a *Authorizer) resolve(
 	ctx context.Context,
 	r Resource,
 	t Target,
-	base string,
+	callerAccount string,
 ) (resource, bool, error) {
+	base := a.ARNPrefix()
 	switch r.Type {
 	case Service:
 		return resource{arn: base + "*"}, true, nil
@@ -390,8 +403,15 @@ func (a *Authorizer) resolve(
 	case Template:
 		return named(ctx, r, t.Template, base+"template/", a.templateTags)
 	case ConfigurationSet:
-		// Configuration sets are not stored: they have no tags.
-		return named(ctx, r, t.ConfigurationSet, base+"configuration-set/", noTags)
+		// Configuration sets are not stored: they have no tags. A send uses
+		// the configuration sets of the account that sends, the caller's,
+		// even when it sends from another account's identity: SES "doesn't
+		// apply" the identity's configuration set to a delegate sender's
+		// mail (SES Developer Guide, "Sending authorization overview").
+		res, use, err := named(ctx, r, t.ConfigurationSet,
+			arnBase(a.region, callerAccount)+"configuration-set/", noTags)
+		res.account = callerAccount
+		return res, use, err
 	}
 	return resource{}, false, fmt.Errorf("unknown resource type %d", r.Type)
 }
@@ -491,7 +511,10 @@ func noTags(context.Context, string) ([]contracts.Tag, error) {
 
 // senderIdentity resolves the identity a send from the address goes
 // through, with prefix its ARN prefix: the first of SenderIdentityCandidates
-// that exists, with its tags. The candidates before it, which do not exist,
+// that exists, with its tags and its sending authorization policies, all of
+// which the send is evaluated with. They are read with the identity, in one
+// transaction, and the send holds the module's resource lock until it is
+// stored, so the policies evaluated are the identity's when it acts. The candidates before it, which do not exist,
 // are its denyAlso, so a Deny written for one of them still applies. When
 // none exists, as mailbox sends from any address, the send is evaluated on
 // the address's domain, the identity a SES account most often verifies,
@@ -517,11 +540,73 @@ func (a *Authorizer) senderIdentity(
 		if err = checkStoredTags(arns[i], id.Tags); err != nil {
 			return resource{}, err
 		}
-		return resource{arn: arns[i], tags: id.Tags, denyAlso: arns[:i]}, nil
+		policies, err := a.identityPolicies(arns[i], id.Policies)
+		if err != nil {
+			return resource{}, err
+		}
+		return resource{
+			arn: arns[i], tags: id.Tags, denyAlso: arns[:i], policies: policies,
+		}, nil
 	}
 	primary := min(1, len(arns)-1)
 	others := append(append([]string(nil), arns[:primary]...), arns[primary+1:]...)
 	return resource{arn: arns[primary], denyAlso: others}, nil
+}
+
+// identityPolicies parses an identity's stored sending authorization
+// policies. Each was checked when it was stored; one that no longer parses
+// fails the request closed rather than being skipped, which could drop a
+// Deny.
+func (a *Authorizer) identityPolicies(
+	arn string,
+	stored []contracts.IdentityPolicy,
+) ([]*policy.Policy, error) {
+	docs := make([]json.RawMessage, len(stored))
+	for i, p := range stored {
+		docs[i] = json.RawMessage(p.Document)
+	}
+	out, err := a.stored.parse(docs)
+	if err != nil {
+		return nil, fmt.Errorf("authz: the policies of %s: %w", arn, err)
+	}
+	return out, nil
+}
+
+// CheckIdentityARN checks a sending authorization ARN a send gives for the
+// address, which field names: FromEmailAddressIdentityArn, or a raw
+// message's X-SES-SOURCE-ARN, X-SES-FROM-ARN or
+// FeedbackForwardingEmailAddressIdentityArn. It must be an SES identity ARN
+// (BadRequestException otherwise) of the service's account and region, as
+// every identity mailbox holds is (NotFoundException otherwise, since SES
+// documents no answer), naming the identity a send from the address is
+// evaluated on (BadRequestException otherwise): the ARN tells SES whose
+// policies authorize the address, and here the identity the address resolves
+// to is the one whose policies do. It is checked for every caller, the root
+// included, before anything is evaluated.
+func (a *Authorizer) CheckIdentityARN(ctx context.Context, field, arn, address string) error {
+	parts := strings.SplitN(arn, ":", 6)
+	if len(parts) != 6 || parts[0] != "arn" || parts[2] != "ses" ||
+		!strings.HasPrefix(parts[5], "identity/") || parts[5] == "identity/" {
+		return sesapi.ErrBadRequest(fmt.Sprintf("Invalid %s: %s", field, arn))
+	}
+	if !strings.HasPrefix(arn, a.ARNPrefix()) {
+		return sesapi.ErrNotFound(fmt.Sprintf("Email identity %s does not exist.", arn))
+	}
+	if len(address) > maxAddressLength {
+		return sesapi.ErrBadRequest(fmt.Sprintf("The address is longer than %d characters.",
+			maxAddressLength))
+	}
+	named := a.ARNPrefix() + "identity/" +
+		CanonicalIdentity(strings.TrimPrefix(parts[5], "identity/"))
+	res, err := a.senderIdentity(ctx, address, a.ARNPrefix()+"identity/")
+	if err != nil {
+		return err
+	}
+	if named != res.arn {
+		return sesapi.ErrBadRequest(fmt.Sprintf("%s %s does not name the identity %s "+
+			"sends from, %s.", field, arn, address, res.arn))
+	}
+	return nil
 }
 
 // CanonicalIdentity is the name an identity is known by: a domain in lower

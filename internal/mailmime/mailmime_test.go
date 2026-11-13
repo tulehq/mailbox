@@ -314,14 +314,20 @@ func TestPrepareRawTakesTheFirstSESHeader(t *testing.T) {
 	// only the first instance."
 	msg := []byte("From: a@example.com\r\nTo: c@example.com\r\nSubject: s\r\n" +
 		"X-SES-CONFIGURATION-SET: first\r\nX-SES-CONFIGURATION-SET: second\r\n" +
-		"X-SES-MESSAGE-TAGS: a=1\r\nX-SES-MESSAGE-TAGS: a=2\r\n\r\nBody.\r\n")
+		"X-SES-MESSAGE-TAGS: a=1\r\nX-SES-MESSAGE-TAGS: a=2\r\n" +
+		"X-SES-SOURCE-ARN: s1\r\nX-SES-SOURCE-ARN: s2\r\n" +
+		"X-SES-FROM-ARN: f1\r\nX-SES-FROM-ARN: f2\r\n" +
+		"X-SES-RETURN-PATH-ARN: r1\r\nX-SES-RETURN-PATH-ARN: r2\r\n\r\nBody.\r\n")
 	raw, err := PrepareRaw(msg, "id", time.Now())
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	if raw.ConfigurationSet != "first" || raw.Tags != "a=1" {
-		t.Fatalf("configuration set %q, tags %q; want the first of each", raw.ConfigurationSet,
-			raw.Tags)
+	if raw.ConfigurationSet != "first" || raw.Tags != "a=1" || raw.SourceARN != "s1" ||
+		raw.FromARN != "f1" || raw.ReturnPathARN != "r1" {
+		t.Fatalf("read %+v; want the first of each", raw)
+	}
+	if strings.Contains(string(raw.MIME), "X-SES-") {
+		t.Fatalf("the X-SES headers are kept:\n%s", raw.MIME)
 	}
 }
 

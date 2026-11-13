@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,14 +51,24 @@ type store struct {
 	contracts.MailboxProvider
 	identities map[string][]contracts.Tag
 	templates  map[string][]contracts.Tag
+	// policies are the identities' sending authorization policies, in
+	// order; an identity with policies exists.
+	policies map[string][]string
 }
 
 func (s *store) GetIdentity(_ context.Context, name string) (*contracts.Identity, error) {
 	tags, ok := s.identities[name]
-	if !ok {
+	docs, hasPolicies := s.policies[name]
+	if !ok && !hasPolicies {
 		return nil, contracts.ErrIdentityNotFound
 	}
-	return &contracts.Identity{Name: name, Tags: tags}, nil
+	id := &contracts.Identity{Name: name, Tags: tags}
+	for i, d := range docs {
+		id.Policies = append(id.Policies, contracts.IdentityPolicy{
+			Name: "p" + strconv.Itoa(i), Document: d,
+		})
+	}
+	return id, nil
 }
 
 func (s *store) GetTemplate(_ context.Context, name string) (*contracts.Template, error) {
@@ -781,15 +792,49 @@ func TestRootIsBoundToTheServicesAccount(t *testing.T) {
 		t.Fatalf("the service's static key: %d %+v", status, e)
 	}
 
+	// The root of another account has full access to its own account only:
+	// here it needs a resource-based policy, and ses:GetAccount has none.
 	const otherRoot = "arn:aws:iam::999999999999:root"
-	h = newHarness(t, "GetAccount", keys{
-		"ROOT": {AccountID: "999999999999", ARN: otherRoot, Root: true},
-	}, &store{})
+	h = newHarness(t, "GetAccount", keys{"ROOT": otherRootPrincipal()}, &store{})
 	h.skip = true
 	status, e := h.call("ROOT")
 	requireDenied(t, status, e, "User: "+otherRoot+" is not authorized to perform: "+
-		"ses:GetAccount on resource: * because no identity-based policy allows the "+
+		"ses:GetAccount on resource: * because no resource-based policy allows the "+
 		"ses:GetAccount action")
+}
+
+// otherRootPrincipal is the root user of account 999999999999, as identity
+// reports it.
+func otherRootPrincipal() sigv4.Principal {
+	const arn = "arn:aws:iam::999999999999:root"
+	return sigv4.Principal{
+		AccountID: "999999999999", ARN: arn, PrincipalARN: arn, UserID: "999999999999",
+		Type: sigv4.PrincipalTypeAccount, Root: true,
+	}
+}
+
+func TestRootAndTheAccountTypeMustAgree(t *testing.T) {
+	// A root principal that is not an Account, and an Account that is not
+	// root, are faults: policy.Authorize grants an Account what Root
+	// grants.
+	notRoot := otherRootPrincipal()
+	notRoot.Root = false
+	rootUser := user(doc(`{"Effect":"Allow","Action":"ses:*","Resource":"*"}`))
+	rootUser.Root = true
+	rootUser.AccountID = "999999999999"
+	for name, p := range map[string]sigv4.Principal{
+		"an Account that is not Root": notRoot,
+		"a Root that is a User":       rootUser,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, "GetAccount", keys{"KEY": p}, &store{})
+			h.skip = true
+			status, e := h.call("KEY")
+			if status != http.StatusInternalServerError || e.Type != sesapi.TypeInternalFailure {
+				t.Fatalf("got %d %+v, want 500 InternalFailure", status, e)
+			}
+		})
+	}
 }
 
 func TestTagKeysThatDifferOnlyByCaseAreRefused(t *testing.T) {

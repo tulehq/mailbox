@@ -25,9 +25,12 @@ import (
 // built from its checkout and run as a process with the same root key, and
 // mailbox is pointed at it through TULE_Auth_IdentityEndpoint.
 
-// identityDirEnv names the identity checkout to build, for a layout where it
-// is not mailbox's sibling.
-const identityDirEnv = "TULE_E2E_IDENTITY_DIR"
+// identityDirEnv and accountsDirEnv name the identity and accounts
+// checkouts to build, for a layout where they are not mailbox's siblings.
+const (
+	identityDirEnv = "TULE_E2E_IDENTITY_DIR"
+	accountsDirEnv = "TULE_E2E_ACCOUNTS_DIR"
+)
 
 // The root key both services are configured with: the AWS documentation's
 // example key, since identity holds an access key ID to at least 16
@@ -77,7 +80,9 @@ func TestIdentityIssuedKeys(t *testing.T) {
 	t.Run("a deleted key is refused", s.testDeletedKey)
 }
 
-func startIdentityStack(t *testing.T) *identityStack {
+// startIdentityStack starts identity, with env's extra variables, and
+// mailbox pointed at it.
+func startIdentityStack(t *testing.T, env ...string) *identityStack {
 	t.Helper()
 
 	port := identityFreePort(t)
@@ -88,7 +93,7 @@ func startIdentityStack(t *testing.T) *identityStack {
 			SecretAccessKey: identityRootSecret,
 		},
 	}
-	s.identity = startIdentity(t, port)
+	s.identity = startIdentity(t, port, env...)
 	s.srv = startServer(t, map[string]string{
 		"TULE_Auth_AccessKeyID":      identityRootKeyID,
 		"TULE_Auth_SecretAccessKey":  identityRootSecret,
@@ -173,11 +178,12 @@ func createUserKey(t *testing.T, ic *iam.Client, user string) aws.Credentials {
 	}
 }
 
-// identityProcess is a running identity service.
+// identityProcess is a running sibling service, identity or accounts.
 type identityProcess struct {
 	cmd     *exec.Cmd
 	exited  chan error
 	out     *identityOutput
+	name    string
 	stopped bool
 }
 
@@ -201,12 +207,19 @@ func (b *identityOutput) String() string {
 }
 
 // startIdentity builds the identity service from its checkout and runs it
-// on port with a fresh store and the root key mailbox has. The process is
-// stopped when the test ends.
-func startIdentity(t *testing.T, port int) *identityProcess {
+// on port with a fresh store and the root key mailbox has, and env's extra
+// variables. The process is stopped when the test ends.
+func startIdentity(t *testing.T, port int, env ...string) *identityProcess {
+	t.Helper()
+	return startSibling(t, "identity", identityDirEnv, port, env...)
+}
+
+// startSibling builds the sibling service name from its checkout, which
+// dirEnv names, and runs it as startIdentity describes.
+func startSibling(t *testing.T, name, dirEnv string, port int, env ...string) *identityProcess {
 	t.Helper()
 
-	bin := buildIdentity(t)
+	bin := buildSibling(t, name, dirEnv)
 	dir := t.TempDir()
 
 	cmd := exec.Command(bin) //nolint:gosec // G204: the binary this test just built
@@ -214,15 +227,18 @@ func startIdentity(t *testing.T, port int) *identityProcess {
 	cmd.Env = append(envWithoutTule(),
 		"TULE_GasEnv=testing",
 		"TULE_Server_Port="+strconv.Itoa(port),
-		"TULE_Store_Path="+filepath.Join(dir, "identity.db"),
+		"TULE_Store_Path="+filepath.Join(dir, name+".db"),
 		"TULE_Auth_AccessKeyID="+identityRootKeyID,
 		"TULE_Auth_SecretAccessKey="+identityRootSecret,
 	)
-	p := &identityProcess{cmd: cmd, exited: make(chan error, 1), out: &identityOutput{}}
+	cmd.Env = append(cmd.Env, env...)
+	p := &identityProcess{
+		cmd: cmd, name: name, exited: make(chan error, 1), out: &identityOutput{},
+	}
 	cmd.Stdout = p.out
 	cmd.Stderr = p.out
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("start identity: %v", err)
+		t.Fatalf("start %s: %v", name, err)
 	}
 	go func() { p.exited <- cmd.Wait() }()
 	t.Cleanup(func() { p.Stop(t) })
@@ -231,31 +247,32 @@ func startIdentity(t *testing.T, port int) *identityProcess {
 	return p
 }
 
-// buildIdentity builds the identity binary into a temporary directory.
-func buildIdentity(t *testing.T) string {
+// buildSibling builds the sibling's binary into a temporary directory.
+func buildSibling(t *testing.T, name, dirEnv string) string {
 	t.Helper()
 
-	// The test runs in mailbox/test/e2e; by default identity is mailbox's
-	// sibling. CI sets the directory. A missing checkout fails the test, so
-	// the cross-service test is never silently left out.
-	src, from := os.Getenv(identityDirEnv), identityDirEnv
+	// The test runs in mailbox/test/e2e; by default the sibling is
+	// mailbox's sibling directory. CI sets the directory. A missing
+	// checkout fails the test, so the cross-service test is never silently
+	// left out.
+	src, from := os.Getenv(dirEnv), dirEnv
 	if src == "" {
-		src, from = filepath.Join("..", "..", "..", "identity"), "the default sibling path"
+		src, from = filepath.Join("..", "..", "..", name), "the default sibling path"
 	}
 	src, err := filepath.Abs(src)
-	requireNoErr(t, err, "identity directory")
+	requireNoErr(t, err, name+" directory")
 	//nolint:gosec // G703: the checkout the test is told to build
 	if _, err = os.Stat(filepath.Join(src, "go.mod")); err != nil {
-		t.Fatalf("no identity checkout at %s (from %s); set %s to an identity checkout: %v",
-			src, from, identityDirEnv, err)
+		t.Fatalf("no %s checkout at %s (from %s); set %s to a %s checkout: %v",
+			name, src, from, dirEnv, name, err)
 	}
 
-	bin := filepath.Join(t.TempDir(), "tule-identity")
+	bin := filepath.Join(t.TempDir(), "tule-"+name)
 	//nolint:gosec // G204: go build of the checkout into this test's directory
 	build := exec.CommandContext(t.Context(), "go", "build", "-o", bin, "./cmd")
 	build.Dir = src
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build identity: %v\n%s", err, out)
+		t.Fatalf("build %s: %v\n%s", name, err, out)
 	}
 	return bin
 }
@@ -290,7 +307,7 @@ func (p *identityProcess) waitReady(t *testing.T, url string) {
 	for time.Now().Before(deadline) {
 		select {
 		case err := <-p.exited:
-			t.Fatalf("identity exited before it was ready: %v\n%s", err, p.out.String())
+			t.Fatalf("%s exited before it was ready: %v\n%s", p.name, err, p.out.String())
 		default:
 		}
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url+"/_ready", nil)
@@ -303,7 +320,7 @@ func (p *identityProcess) waitReady(t *testing.T, url string) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("identity was not ready within %v\n%s", clientTimeout, p.out.String())
+	t.Fatalf("%s was not ready within %v\n%s", p.name, clientTimeout, p.out.String())
 }
 
 // Stop interrupts the process, as a signal stops the service, and kills it
@@ -320,11 +337,11 @@ func (p *identityProcess) Stop(t *testing.T) {
 	select {
 	case err := <-p.exited:
 		if err != nil {
-			t.Logf("identity exited: %v", err)
+			t.Logf("%s exited: %v", p.name, err)
 		}
 	case <-time.After(clientTimeout):
 		_ = p.cmd.Process.Kill()
 		err := <-p.exited
-		t.Errorf("identity did not stop on interrupt (%v)\n%s", err, p.out.String())
+		t.Errorf("%s did not stop on interrupt (%v)\n%s", p.name, err, p.out.String())
 	}
 }
