@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -30,7 +31,13 @@ const (
 	senderID  = "AIDAEXAMPLESENDER001"
 	// goneARN is a user ARN no user has.
 	goneARN = "arn:aws:iam::000000000000:user/gone"
+	// longARN is a user whose unique ID is as long as IAM allows, 128
+	// characters, longer than its ARN.
+	longARN = "arn:aws:iam::000000000000:user/long"
 )
+
+// longID is longARN's unique ID.
+var longID = "AIDA" + strings.Repeat("L", 124)
 
 // The key of an IAM user with no policies, which the fake identity issues.
 const (
@@ -95,9 +102,10 @@ func (f *principalIdentity) principalIDs(t *testing.T, w http.ResponseWriter, r 
 		return
 	}
 	out := principals.Response{IDs: map[string]string{}, ARNs: map[string]string{}}
+	known := map[string]string{senderARN: senderID, longARN: longID}
 	for _, arn := range req.ARNs {
-		if arn == senderARN {
-			out.IDs[arn] = senderID
+		if id, ok := known[arn]; ok {
+			out.IDs[arn] = id
 		}
 	}
 	for _, id := range req.IDs {
@@ -325,6 +333,35 @@ func TestAPolicyIsBoundOutsideTheLock(t *testing.T) {
 	close(f.release)
 	if err = <-done; err != nil {
 		t.Fatalf("create policy: %v", err)
+	}
+}
+
+// TestABoundPolicyIsHeldToTheSizeLimit refuses a policy within 4 KB as
+// sent whose bound document, with longer unique IDs in place of its ARNs,
+// is over it, as an oversized policy is refused.
+func TestABoundPolicyIsHeldToTheSizeLimit(t *testing.T) {
+	_, c, _, db := startBoundApp(t)
+	statements := make([]string, 20)
+	for i := range statements {
+		statements[i] = fmt.Sprintf(`{"Sid":"S%02d","Effect":"Allow","Principal":{"AWS":"%s"},`+
+			`"Action":"ses:SendEmail",`+
+			`"Resource":"arn:aws:ses:us-east-1:000000000000:identity/example.com"}`, i, longARN)
+	}
+	doc := `{"Version":"2012-10-17","Statement":[` + strings.Join(statements, ",") + `]}`
+	if len(doc) > authz.MaxIdentityPolicySize {
+		t.Fatalf("the policy as sent is %d bytes, over the limit", len(doc))
+	}
+	_, err := c.CreateEmailIdentityPolicy(context.Background(),
+		&sesv2.CreateEmailIdentityPolicyInput{
+			EmailIdentity: aws.String("example.com"), PolicyName: aws.String("send"),
+			Policy: aws.String(doc),
+		})
+	requireAPIError(t, err, "BadRequestException", http.StatusBadRequest)
+	if !strings.Contains(err.Error(), "The policy cannot exceed 4 KB") {
+		t.Fatalf("error = %v", err)
+	}
+	if docs := storedDocuments(t, db); len(docs) != 0 {
+		t.Fatalf("the store holds %v", docs)
 	}
 }
 

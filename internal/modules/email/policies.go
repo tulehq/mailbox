@@ -79,7 +79,8 @@ func (m *Module) bind(ctx context.Context, doc string) (string, error) {
 	return bound, nil
 }
 
-// boundPolicyParams are policyParams with the document bound. The request
+// boundPolicyParams are policyParams with the document bound, and held to
+// the size limit again, as bound, since that is what is stored. The request
 // is authorized first, outside the resource lock, so that only a caller
 // that may write the policy has it bound; the caller authorizes it again,
 // with the store write, under the lock, which is the check that counts.
@@ -91,8 +92,10 @@ func (m *Module) boundPolicyParams(ctx gas.Context) (policyRequest, error) {
 	if err = m.authz.Authorize(ctx, authz.Target{Identity: req.identity}); err != nil {
 		return req, err
 	}
-	req.document, err = m.bind(ctx, req.document)
-	return req, err
+	if req.document, err = m.bind(ctx, req.document); err != nil {
+		return req, err
+	}
+	return req, authz.CheckIdentityPolicySize(req.document)
 }
 
 func (m *Module) createEmailIdentityPolicy(

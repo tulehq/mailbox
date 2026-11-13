@@ -354,7 +354,9 @@ conditions are kept. A send is evaluated with the stored document, so a
 user or role deleted and created again under the same name is another
 principal, which the policy does not name, until the policy is saved again.
 The rest of the document is kept as it was sent, its members in their
-order, except the white space of an object in which an ID replaced an ARN.
+order, except the white space of an object in which an ID replaced an ARN. The
+bound document is held to the 4 KB limit again, since a unique ID can be
+longer than the ARN it replaces, and refused as an oversized one is.
 
 - **A user or role that does not exist** is refused with
   `BadRequestException`, `Invalid policy: Invalid principal in policy:
