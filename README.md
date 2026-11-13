@@ -360,8 +360,9 @@ order, except the white space of an object in which an ID replaced an ARN.
   `BadRequestException`, `Invalid policy: Invalid principal in policy:
   "AWS":"<arn>"`, the error the SES v2 reference gives for invalid
   input ("The input you provided is invalid."; SES documents no message, so
-  the wording is mailbox's choice). It is reported only once the request
-  is authorized: a caller that may not write the policy is denied whether or
+  the wording is mailbox's choice). The request is authorized before
+  identity is asked, and again with the write under the lock: a caller that
+  may not write the policy is denied without a call to identity, whether or
   not the principals it names exist.
 - **Reads show the policy as AWS shows it.** `GetEmailIdentityPolicies` and
   `GetEmailIdentity` ask identity for the current ARN of each unique ID: one

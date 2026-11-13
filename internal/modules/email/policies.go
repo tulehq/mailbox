@@ -18,9 +18,8 @@ import (
 // send from it.
 
 // policyRequest is a policy operation's identity, policy name and, for a
-// create or an update, document, checked, and bound when bindErr is nil.
+// create or an update, document, checked.
 type policyRequest struct {
-	bindErr  error
 	identity string
 	name     string
 	document string
@@ -58,9 +57,10 @@ func (m *Module) policyParams(ctx gas.Context, withDocument bool) (policyRequest
 // bind binds the principals of a policy a create or an update stores, as
 // AWS does when it saves the policy: a user or role ARN becomes the unique
 // ID of the IAM user or role that has it now, which the policy is evaluated
-// with. It runs before the resource lock, since it asks identity. Its
-// error is returned only once the request is authorized, so a caller that
-// may not write the policy learns nothing of which users and roles exist.
+// with. It runs before the resource lock, since it asks identity, and
+// after the request is authorized, so a caller that may not write the
+// policy makes no call to identity and learns nothing of which users and
+// roles exist.
 //
 // An ARN no user or role has is BadRequestException, the error the SES v2
 // API reference gives for invalid input ("The input you provided is
@@ -79,15 +79,20 @@ func (m *Module) bind(ctx context.Context, doc string) (string, error) {
 	return bound, nil
 }
 
-// boundPolicyParams are policyParams with the document bound, or with
-// bind's error, which the caller returns once the request is authorized.
+// boundPolicyParams are policyParams with the document bound. The request
+// is authorized first, outside the resource lock, so that only a caller
+// that may write the policy has it bound; the caller authorizes it again,
+// with the store write, under the lock, which is the check that counts.
 func (m *Module) boundPolicyParams(ctx gas.Context) (policyRequest, error) {
 	req, err := m.policyParams(ctx, true)
 	if err != nil {
 		return req, err
 	}
-	req.document, req.bindErr = m.bind(ctx, req.document)
-	return req, nil
+	if err = m.authz.Authorize(ctx, authz.Target{Identity: req.identity}); err != nil {
+		return req, err
+	}
+	req.document, err = m.bind(ctx, req.document)
+	return req, err
 }
 
 func (m *Module) createEmailIdentityPolicy(
@@ -101,9 +106,6 @@ func (m *Module) createEmailIdentityPolicy(
 	return locked(func() error {
 		if err := m.authz.Authorize(ctx, authz.Target{Identity: req.identity}); err != nil {
 			return err
-		}
-		if req.bindErr != nil {
-			return req.bindErr
 		}
 		if err := m.store.CreateIdentityPolicy(ctx, req.identity, contracts.IdentityPolicy{
 			Name: req.name, Document: req.document,
@@ -144,9 +146,6 @@ func (m *Module) updateEmailIdentityPolicy(
 	return locked(func() error {
 		if err := m.authz.Authorize(ctx, authz.Target{Identity: req.identity}); err != nil {
 			return err
-		}
-		if req.bindErr != nil {
-			return req.bindErr
 		}
 		if err := m.store.UpdateIdentityPolicy(ctx, req.identity, contracts.IdentityPolicy{
 			Name: req.name, Document: req.document,
