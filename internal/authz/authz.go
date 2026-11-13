@@ -154,6 +154,13 @@ func (a *Authorizer) authorize(ctx context.Context, c *call, t Target) error {
 	if !ok {
 		return errors.New("authz: the request has no verified principal")
 	}
+	// Root skips evaluation, and policy.Authorize gives an Account caller
+	// the root's full identity access: the two must agree, checked before
+	// either is relied on, in the service's account as in any other.
+	if (p.Type == sigv4.PrincipalTypeAccount) != p.Root {
+		return fmt.Errorf("authz: principal %s has Root %t and type %q, which disagree",
+			p.ARN, p.Root, p.Type)
+	}
 	// Root is the root of its own account only: a root principal of
 	// another account is evaluated like any other principal of it.
 	if !p.Root || p.AccountID != a.account {
@@ -173,12 +180,6 @@ func (a *Authorizer) authorize(ctx context.Context, c *call, t Target) error {
 // account and across accounts (IAM User Guide, "Policy evaluation logic"
 // and "Cross-account policy evaluation logic").
 func (a *Authorizer) evaluate(ctx context.Context, c *call, t Target, p sigv4.Principal) error {
-	// policy.Authorize gives an Account caller the root's full identity
-	// access, which mailbox grants from Root: the two must agree.
-	if (p.Type == sigv4.PrincipalTypeAccount) != p.Root {
-		return fmt.Errorf("authz: principal %s has Root %t and type %q, which disagree",
-			p.ARN, p.Root, p.Type)
-	}
 	policies, err := a.identity.parse(p.Policies)
 	if err != nil {
 		return err

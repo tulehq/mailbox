@@ -224,7 +224,7 @@ func requireDenied(t *testing.T, status int, e sesapi.Error, message string) {
 
 func TestTheRootIsNeverEvaluated(t *testing.T) {
 	h := newHarness(t, "SendEmail", keys{
-		"ROOT": {AccountID: testAccount, ARN: "arn:aws:iam::" + testAccount + ":root", Root: true},
+		"ROOT": serviceRoot(),
 	}, &store{})
 	h.target = Target{Sender: "a@example.com"}
 	if status, e := h.call("ROOT"); status != http.StatusOK {
@@ -803,6 +803,16 @@ func TestRootIsBoundToTheServicesAccount(t *testing.T) {
 		"ses:GetAccount action")
 }
 
+// serviceRoot is the root user of the service's account, as the static key
+// reports it.
+func serviceRoot() sigv4.Principal {
+	const arn = "arn:aws:iam::" + testAccount + ":root"
+	return sigv4.Principal{
+		AccountID: testAccount, ARN: arn, PrincipalARN: arn, UserID: testAccount,
+		Type: sigv4.PrincipalTypeAccount, Root: true,
+	}
+}
+
 // otherRootPrincipal is the root user of account 999999999999, as identity
 // reports it.
 func otherRootPrincipal() sigv4.Principal {
@@ -819,12 +829,19 @@ func TestRootAndTheAccountTypeMustAgree(t *testing.T) {
 	// grants.
 	notRoot := otherRootPrincipal()
 	notRoot.Root = false
+	ownNotRoot := serviceRoot()
+	ownNotRoot.Root = false
 	rootUser := user(doc(`{"Effect":"Allow","Action":"ses:*","Resource":"*"}`))
 	rootUser.Root = true
-	rootUser.AccountID = "999999999999"
+	otherRootUser := rootUser
+	otherRootUser.AccountID = "999999999999"
+	// In the service's own account too, where Root alone would skip
+	// evaluation.
 	for name, p := range map[string]sigv4.Principal{
-		"an Account that is not Root": notRoot,
-		"a Root that is a User":       rootUser,
+		"an Account that is not Root":                    notRoot,
+		"an Account of the service's account, not Root":  ownNotRoot,
+		"a Root that is a User of the service's account": rootUser,
+		"a Root that is a User of another account":       otherRootUser,
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, "GetAccount", keys{"KEY": p}, &store{})
@@ -841,7 +858,7 @@ func TestTagKeysThatDifferOnlyByCaseAreRefused(t *testing.T) {
 	allow := doc(`{"Effect":"Allow","Action":"ses:*","Resource":"*"}`)
 	principals := keys{
 		"USER": user(allow),
-		"ROOT": {AccountID: testAccount, ARN: "arn:aws:iam::" + testAccount + ":root", Root: true},
+		"ROOT": serviceRoot(),
 	}
 	clash := []contracts.Tag{{Key: "Env", Value: "dev"}, {Key: "env", Value: "prod"}}
 
