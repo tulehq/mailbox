@@ -315,6 +315,16 @@ func TestADelegatesARNsChooseTheIdentitiesEvaluated(t *testing.T) {
 			" because no resource-based policy allows the ses:SendEmail action")
 		send(t, c, from("ops@example.com", "example.com"))
 	})
+	t.Run("a Deny of the identity an ARN passes over", func(t *testing.T) {
+		// mailbox fails closed: the address identity's Deny applies though
+		// the ARN chooses the domain's grant.
+		s.putPolicy(t, "ops@example.com", "deny", policyDoc(
+			grantSend("Deny", "ops@example.com", delegateARN)))
+		requireAccessDenied(t, errOf(c.SendEmail(t.Context(), from("ops@example.com",
+			"example.com"))), "User: "+delegateARN+" is not authorized to perform: "+
+			"ses:SendEmail on resource: "+sesARN("identity/ops@example.com")+" with an "+
+			"explicit deny in a resource-based policy")
+	})
 	t.Run("the feedback address's identity", func(t *testing.T) {
 		s.createIdentity(t, "bounces.example")
 		in := from("a@example.com", "example.com")

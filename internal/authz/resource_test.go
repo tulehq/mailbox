@@ -300,3 +300,92 @@ func TestTheFeedbackAddressIsEvaluatedOnItsIdentity(t *testing.T) {
 	status, e = h.call("KEY")
 	requireDenied(t, status, e, notAllowed("ses:SendEmail", sesARN("identity/bounces.example")))
 }
+
+// opsPolicy is a sending authorization policy of identity/ops@example.com
+// with one statement of the effect for the AWS principal, and the condition
+// if any.
+func opsPolicy(effect, principal, condition string) string {
+	if condition != "" {
+		condition = `,"Condition":` + condition
+	}
+	return string(doc(`{"Effect":"` + effect + `","Principal":{"AWS":"` + principal + `"},` +
+		`"Action":"ses:SendEmail","Resource":"` + sesARN("identity/ops@example.com") + `"` +
+		condition + `}`))
+}
+
+func TestADenyOfAnIdentityAnARNPassesOverApplies(t *testing.T) {
+	ops := sesARN("identity/ops@example.com")
+	for _, tc := range []struct {
+		target Target
+		name   string
+		want   string
+		ops    []string
+	}{
+		{
+			name:   "a Deny in the address identity's policy",
+			ops:    []string{opsPolicy("Deny", otherUserARN, "")},
+			target: Target{Sender: "ops@example.com", SenderIdentityName: "example.com"},
+			want: deniedAs(otherUserARN, "ses:SendEmail", ops,
+				"with an explicit deny in a resource-based policy"),
+		},
+		{
+			name: "a Deny on the address identity's tags",
+			ops: []string{opsPolicy("Deny", "*",
+				`{"StringEquals":{"aws:ResourceTag/env":"prod"}}`)},
+			target: Target{Sender: "ops@example.com", SenderIdentityName: "example.com"},
+			want: deniedAs(otherUserARN, "ses:SendEmail", ops,
+				"with an explicit deny in a resource-based policy"),
+		},
+		{
+			name: "a Deny in the feedback address identity's policy",
+			ops:  []string{opsPolicy("Deny", otherAccount, "")},
+			target: Target{
+				Sender: "a@example.com", Feedback: "ops@example.com",
+				FeedbackIdentityName: "example.com",
+			},
+			want: deniedAs(otherUserARN, "ses:SendEmail", ops,
+				"with an explicit deny in a resource-based policy"),
+		},
+		{
+			name:   "a Deny that does not apply",
+			ops:    []string{opsPolicy("Deny", "111111111111", "")},
+			target: Target{Sender: "ops@example.com", SenderIdentityName: "example.com"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &store{
+				identities: map[string][]contracts.Tag{
+					"ops@example.com": {{Key: "env", Value: "prod"}},
+				},
+				policies: map[string][]string{
+					"example.com": {grant("Allow", otherAccount)}, "ops@example.com": tc.ops,
+				},
+			}
+			h := newHarness(t, "SendEmail", keys{"KEY": delegate(allowSend)}, st)
+			h.target = tc.target
+			status, e := h.call("KEY")
+			if tc.want == "" {
+				if status != http.StatusOK {
+					t.Fatalf("%d %+v", status, e)
+				}
+				return
+			}
+			requireDenied(t, status, e, tc.want)
+		})
+	}
+}
+
+func TestAnAllowOfAnIdentityAnARNPassesOverDoesNotCount(t *testing.T) {
+	// Without the domain's grant the send is denied on the domain.
+	h := newHarness(t, "SendEmail", keys{"KEY": delegate(allowSend)}, &store{
+		policies: map[string][]string{
+			"example.com":     {grant("Allow", "111111111111")},
+			"ops@example.com": {opsPolicy("Allow", otherAccount, "")},
+		},
+	})
+	h.target = Target{Sender: "ops@example.com", SenderIdentityName: "example.com"}
+	status, e := h.call("KEY")
+	requireDenied(t, status, e, deniedAs(otherUserARN, "ses:SendEmail",
+		sesARN("identity/example.com"),
+		"because no resource-based policy allows the ses:SendEmail action"))
+}
