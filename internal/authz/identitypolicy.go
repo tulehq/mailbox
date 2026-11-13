@@ -32,6 +32,18 @@ func CheckIdentityPolicyName(name string) error {
 	return nil
 }
 
+// CheckIdentityPolicySize refuses a sending authorization policy over
+// MaxIdentityPolicySize. It is checked again on a document once its
+// principals are bound, since a unique ID can be longer than the ARN it
+// replaces.
+func CheckIdentityPolicySize(doc string) error {
+	if len(doc) > MaxIdentityPolicySize {
+		return sesapi.ErrBadRequest(fmt.Sprintf("The policy cannot exceed 4 KB: it is %d bytes.",
+			len(doc)))
+	}
+	return nil
+}
+
 // CheckIdentityPolicy refuses a sending authorization policy for the
 // identity (by its canonical name) that SES would not store: one over
 // MaxIdentityPolicySize, one tule.dev/policy's ParseResource refuses (a
@@ -44,12 +56,11 @@ func CheckIdentityPolicyName(name string) error {
 // string unique within the policy, as ParseResource accepts it: the guide
 // gives it as "Any string." that "Uniquely identifies the statement".
 func (a *Authorizer) CheckIdentityPolicy(identity, doc string) error {
-	switch {
-	case doc == "":
+	if doc == "" {
 		return sesapi.ErrBadRequest("You must specify a Policy.")
-	case len(doc) > MaxIdentityPolicySize:
-		return sesapi.ErrBadRequest(fmt.Sprintf("The policy cannot exceed 4 KB: it is %d bytes.",
-			len(doc)))
+	}
+	if err := CheckIdentityPolicySize(doc); err != nil {
+		return err
 	}
 	if _, err := policy.ParseResource([]byte(doc)); err != nil {
 		var pe *policy.ParseError
