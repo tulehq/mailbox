@@ -1,7 +1,9 @@
-// Package authz authorizes requests by the caller's IAM identity policies,
-// as AWS authorizes them within an account: the root principal is always
-// allowed, and any other principal needs an Allow for the operation's action
-// on every resource the operation is evaluated on, and no Deny.
+// Package authz authorizes requests by the caller's IAM identity policies
+// and the resources' resource-based policies, as AWS authorizes them within
+// an account and across accounts: the root principal of the service's
+// account is always allowed, and any other principal needs the operation's
+// action allowed on every resource the operation is evaluated on, and no
+// Deny.
 //
 // Each route is wrapped in Guard with its entry in the operations table.
 // An operation evaluated on "*" or on the whole service is authorized there,
@@ -44,13 +46,14 @@ const (
 // Amazon SES).
 const apiVersion = "2"
 
-// Authorizer evaluates requests against the caller's identity policies.
+// Authorizer evaluates requests against the caller's identity policies and
+// the resources' resource-based policies.
 type Authorizer struct {
-	store   contracts.MailboxProvider
-	cache   *policyCache
-	now     func() time.Time
-	account string
-	region  string
+	store    contracts.MailboxProvider
+	identity *policyCache
+	now      func() time.Time
+	account  string
+	region   string
 }
 
 // New returns an Authorizer for the service's account and region, whose
@@ -60,7 +63,8 @@ type Authorizer struct {
 // would otherwise pick the region its ARNs and aws:RequestedRegion carry.
 func New(store contracts.MailboxProvider, account, region string) *Authorizer {
 	return &Authorizer{
-		store: store, cache: newPolicyCache(maxCachedPolicies), now: time.Now,
+		store: store, identity: newPolicyCache(maxCachedPolicies, policy.ParseIdentity),
+		now:     time.Now,
 		account: account, region: region,
 	}
 }
@@ -147,7 +151,7 @@ func (a *Authorizer) authorize(ctx context.Context, c *call, t Target) error {
 		return errors.New("authz: the request has no verified principal")
 	}
 	// Root is the root of its own account only: a root principal of
-	// another account is evaluated, and refused, like any other.
+	// another account is evaluated like any other principal of it.
 	if !p.Root || p.AccountID != a.account {
 		if err := a.evaluate(ctx, c, t, p); err != nil {
 			return err
@@ -159,16 +163,13 @@ func (a *Authorizer) authorize(ctx context.Context, c *call, t Target) error {
 
 // evaluate evaluates a principal other than the root: each of the
 // operation's actions on each of its resources must be allowed, in the
-// order of its entry, and the first that is not is the one reported.
-//
-// A principal of another account is then refused even when its identity
-// policies allow the request: in AWS a cross-account request needs a
-// resource-based policy of the resource's account as well (IAM User Guide,
-// "Cross-account policy evaluation logic"), and none is enforced here, so
-// nothing can grant one. One store serves every account, so allowing it
-// would let any account reach the service account's mail.
+// order of its entry, and the first that is not is the one reported. Each
+// is decided by policy.Authorize with the caller's identity policies and
+// the resource's resource-based policies, as AWS evaluates them within one
+// account and across accounts (IAM User Guide, "Policy evaluation logic"
+// and "Cross-account policy evaluation logic").
 func (a *Authorizer) evaluate(ctx context.Context, c *call, t Target, p sigv4.Principal) error {
-	policies, err := a.cache.parse(p.Policies)
+	policies, err := a.identity.parse(p.Policies)
 	if err != nil {
 		return err
 	}
@@ -188,17 +189,29 @@ func (a *Authorizer) evaluate(ctx context.Context, c *call, t Target, p sigv4.Pr
 	if err != nil {
 		return err
 	}
+	caller := callerOf(p)
 	for _, action := range c.op.actions(t) {
 		for _, res := range resources {
-			if err = decide(p.ARN, action, res, keys, policies); err != nil {
+			if err = decide(caller, action, res, keys, policies); err != nil {
 				return err
 			}
 		}
 	}
-	if p.AccountID != a.account {
-		return sesapi.ErrNoResourcePolicy(p.ARN, c.op.Action, resources[0].arn)
-	}
 	return nil
+}
+
+// callerOf is the policy.Caller of a principal, from the attributes its
+// KeySource supplies. tule.dev/policy derives aws:PrincipalArn,
+// aws:PrincipalAccount, aws:userid, aws:PrincipalType and aws:username from
+// it, and refuses a caller whose fields disagree.
+func callerOf(p sigv4.Principal) policy.Caller {
+	return policy.Caller{
+		AccountID:    p.AccountID,
+		ARN:          p.ARN,
+		PrincipalARN: p.PrincipalARN,
+		UserID:       p.UserID,
+		Type:         policy.PrincipalType(p.Type),
+	}
 }
 
 // requestKeys are the request's condition keys, held to the bounds with the
@@ -224,40 +237,71 @@ func (a *Authorizer) requestKeys(
 	return keys, nil
 }
 
-// decide is nil when the policies allow the action on the resource, else
-// its AccessDeniedException. An explicit Deny of any of the resource's
-// denyAlso ARNs refuses it too.
+// decide is nil when the caller's identity policies and the resource's
+// policies allow the action on the resource, else its AccessDeniedException.
+// An explicit Deny of any of the resource's denyAlso ARNs refuses it too.
 func decide(
-	principal, action string,
+	caller policy.Caller,
+	action string,
 	res resource,
 	keys map[string][]string,
-	policies []*policy.Policy,
+	identity []*policy.Policy,
 ) error {
-	ctxKeys := contextFor(keys, res)
-	d := policy.Evaluate(policy.Request{
-		Action:    action,
-		Resource:  res.arn,
-		Principal: principal,
-		Context:   ctxKeys,
-	}, policies...)
-	if d.Decision != policy.ExplicitDeny {
+	req := policy.AuthorizeRequest{
+		Action:          action,
+		Resource:        res.arn,
+		ResourceAccount: res.account,
+		Caller:          caller,
+		Context:         contextFor(keys, res),
+	}
+	az := authorize(req, res.policies, identity)
+	if az.Decision != policy.ExplicitDeny {
 		for _, arn := range res.denyAlso {
-			also := policy.Evaluate(policy.Request{
-				Action: action, Resource: arn, Principal: principal, Context: ctxKeys,
-			}, policies...)
-			if also.Decision == policy.ExplicitDeny {
-				return sesapi.ErrExplicitlyDenied(principal, action, arn)
+			also := req
+			also.Resource = arn
+			if d := authorize(also, nil, identity); d.Decision == policy.ExplicitDeny {
+				return sesapi.ErrAccessDenied(caller.ARN, action, arn, d.Reason.Message(action))
 			}
 		}
 	}
-	switch d.Decision {
-	case policy.Allow:
+	if az.Decision == policy.Allow {
 		return nil
-	case policy.ExplicitDeny:
-		return sesapi.ErrExplicitlyDenied(principal, action, res.arn)
-	default:
-		return sesapi.ErrNotAllowed(principal, action, res.arn)
 	}
+	return sesapi.ErrAccessDenied(caller.ARN, action, res.arn, az.Reason.Message(action))
+}
+
+// authorize is policy.Authorize with every one of a resource's
+// resource-based policies, an email identity having up to 20: the request
+// is denied when any of them denies it, and otherwise allowed when it is
+// allowed with any of them, as it would be with one policy of all their
+// statements. Every one is evaluated before an Allow is returned, so a
+// Deny in a later one applies. A denied request reports the first policy's
+// reason, which is the same for each, since none applies a Deny.
+func authorize(
+	req policy.AuthorizeRequest,
+	resourcePolicies, identity []*policy.Policy,
+) policy.Authorization {
+	if len(resourcePolicies) == 0 {
+		return policy.Authorize(req, nil, identity...)
+	}
+	var first, allowed policy.Authorization
+	found := false
+	for i, rp := range resourcePolicies {
+		az := policy.Authorize(req, rp, identity...)
+		switch {
+		case az.Decision == policy.ExplicitDeny:
+			return az
+		case i == 0:
+			first = az
+		}
+		if az.Decision == policy.Allow && !found {
+			allowed, found = az, true
+		}
+	}
+	if found {
+		return allowed
+	}
+	return first
 }
 
 // resource is one resource a request is evaluated on: its ARN, and the tags
@@ -266,11 +310,16 @@ func decide(
 // an Allow: the sender identities that do not exist, which mailbox lets a
 // send go through regardless. keys replace the request's keys of the same
 // names for this resource, a nil value removing one.
+//
+// account is the ID of the account that owns the resource, and policies are
+// its resource-based policies, none for a resource that has none.
 type resource struct {
 	keys     map[string][]string
 	arn      string
+	account  string
 	tags     []contracts.Tag
 	denyAlso []string
+	policies []*policy.Policy
 }
 
 // arnBase is the start of the ARNs of an account in a region:
@@ -288,7 +337,7 @@ func (a *Authorizer) resources(
 	base string,
 ) ([]resource, error) {
 	if len(op.Resources) == 0 {
-		return []resource{{arn: "*"}}, nil
+		return []resource{{arn: "*", account: a.account}}, nil
 	}
 	out := make([]resource, 0, len(op.Resources))
 	for _, r := range op.Resources {
@@ -297,6 +346,8 @@ func (a *Authorizer) resources(
 			return nil, fmt.Errorf("authz: %s: %w", op.Name, err)
 		}
 		if use {
+			// Every resource mailbox stores is the service account's.
+			res.account = a.account
 			out = append(out, res)
 		}
 	}
@@ -532,14 +583,10 @@ func (a *Authorizer) templateTags(ctx context.Context, name string) ([]contracts
 
 // globalKeys are the global condition keys (IAM User Guide, "AWS global
 // condition context keys") the service has for every request, which also
-// fill policy variables.
-//
-// aws:PrincipalArn is the caller's ARN for an IAM user, and for a role
-// session its role's ARN without the role's path, which the session's ARN
-// does not carry and identity does not report: a condition on a role path
-// does not match it. aws:userid is left out, as identity does not report
-// unique IDs; aws:PrincipalTag/<key> is left out, as it does not report
-// tags.
+// fill policy variables. aws:PrincipalArn, aws:PrincipalAccount,
+// aws:userid, aws:PrincipalType and aws:username are not among them:
+// policy.Authorize supplies them from the caller (callerOf).
+// aws:PrincipalTag/<key> is each of the principal's tags.
 func globalKeys(
 	r *http.Request,
 	p sigv4.Principal,
@@ -548,48 +595,18 @@ func globalKeys(
 ) map[string][]string {
 	now = now.UTC()
 	keys := map[string][]string{
-		"aws:PrincipalAccount": {p.AccountID},
-		"aws:CurrentTime":      {now.Format(time.RFC3339)},
-		"aws:EpochTime":        {strconv.FormatInt(now.Unix(), 10)},
-		"aws:SecureTransport":  {strconv.FormatBool(r.TLS != nil)},
-		"aws:RequestedRegion":  {region},
+		"aws:CurrentTime":     {now.Format(time.RFC3339)},
+		"aws:EpochTime":       {strconv.FormatInt(now.Unix(), 10)},
+		"aws:SecureTransport": {strconv.FormatBool(r.TLS != nil)},
+		"aws:RequestedRegion": {region},
 	}
-	for k, v := range principalKeys(p.ARN) {
-		keys[k] = []string{v}
+	for k, v := range p.Tags {
+		keys["aws:PrincipalTag/"+k] = []string{v}
 	}
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		keys["aws:SourceIp"] = []string{host}
 	}
 	return keys
-}
-
-// principalKeys derives aws:PrincipalArn, aws:PrincipalType and, for an IAM
-// user, aws:username from the caller's ARN: arn:aws:iam::<account>:user/
-// <path><name>, or arn:aws:sts::<account>:assumed-role/<role>/<session>.
-func principalKeys(arn string) map[string]string {
-	parts := strings.SplitN(arn, ":", 6)
-	if len(parts) != 6 {
-		return nil
-	}
-	partition, svc, account, res := parts[1], parts[2], parts[4], parts[5]
-	switch {
-	case svc == "iam" && strings.HasPrefix(res, "user/"):
-		return map[string]string{
-			"aws:PrincipalArn":  arn,
-			"aws:PrincipalType": "User",
-			"aws:username":      res[strings.LastIndex(res, "/")+1:],
-		}
-	case svc == "sts" && strings.HasPrefix(res, "assumed-role/"):
-		role, _, ok := strings.Cut(strings.TrimPrefix(res, "assumed-role/"), "/")
-		if !ok {
-			return nil
-		}
-		return map[string]string{
-			"aws:PrincipalArn":  "arn:" + partition + ":iam::" + account + ":role/" + role,
-			"aws:PrincipalType": "AssumedRole",
-		}
-	}
-	return map[string]string{"aws:PrincipalArn": arn}
 }
 
 // operationKeys are the service-specific keys op's entry lists, from t.
