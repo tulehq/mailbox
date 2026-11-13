@@ -171,7 +171,7 @@ func TestAResourcePolicyWithinTheAccount(t *testing.T) {
 	userARN := "arn:aws:iam::" + account + ":user/plain"
 	c := sesClientWith(s.srv, key)
 
-	t.Run("naming the user is enough", func(t *testing.T) {
+	t.Run("naming the IAM user is enough", func(t *testing.T) {
 		s.putPolicy(t, "users.example", "user", policyDoc(
 			grantSend("Allow", "users.example", userARN)))
 		send(t, c, simpleInput("a@users.example", "Granted", "Body.", "to@example.com"))
