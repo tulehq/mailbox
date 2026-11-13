@@ -113,6 +113,36 @@ func decodeHeader(v string) string {
 	return d
 }
 
+// checkHeaderBytes refuses a raw message whose header holds a byte that
+// readers of the message may not agree on: a CR that does not end a line
+// with its LF, which some parsers, Python's email among them, read as a
+// line end where this one does not, so it would hide a field from the
+// sender and recipients SES is authorized for; and any other control
+// character but HTAB, NUL included, which RFC 5322 does not allow in a
+// header field (3.6.8 and 2.2) and some readers split lines on. A lone LF
+// ends a line here as everywhere, and bytes of 128 and up (RFC 6532's UTF-8)
+// stay as they are.
+func checkHeaderBytes(msg []byte) error {
+	for rest := msg; len(rest) > 0; {
+		var line []byte
+		line, rest = cutLine(rest)
+		content := bytes.TrimSuffix(line, []byte("\n"))
+		content = bytes.TrimSuffix(content, []byte("\r"))
+		for _, c := range content {
+			switch {
+			case c == '\r':
+				return errors.New("the message header has a CR that does not end a line")
+			case c < 0x20 && c != '\t', c == 0x7f:
+				return fmt.Errorf("the message header has the control character 0x%02x", c)
+			}
+		}
+		if len(content) == 0 {
+			return nil // the blank line that ends the header
+		}
+	}
+	return nil
+}
+
 // checkLineLengths refuses a message with a line longer than maxLineLength.
 func checkLineLengths(msg []byte) error {
 	for rest := msg; len(rest) > 0; {

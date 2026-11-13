@@ -10,6 +10,7 @@ import (
 
 	"github.com/gasmod/gas"
 
+	"tule.dev/mailbox/internal/authz"
 	"tule.dev/mailbox/internal/contracts"
 	"tule.dev/mailbox/internal/sesapi"
 )
@@ -65,11 +66,17 @@ func (m *Module) createEmailIdentity(ctx gas.Context) error {
 	if err != nil {
 		return err
 	}
+	req.EmailIdentity = authz.CanonicalIdentity(req.EmailIdentity)
 	if err = sesapi.Tags(req.Tags); err != nil {
 		return err
 	}
 	dkim, err := dkimOf(typ, req.DkimSigningAttributes)
 	if err != nil {
+		return err
+	}
+	if err = m.authz.Authorize(ctx, authz.Target{
+		Identity: req.EmailIdentity, Tags: storeTags(req.Tags),
+	}); err != nil {
 		return err
 	}
 
@@ -188,6 +195,8 @@ func wireDKIM(id *contracts.Identity) *sesapi.DkimAttributes {
 	return out
 }
 
+// identityParam returns the identity the path names, once the request is
+// authorized for it.
 func (m *Module) identityParam(ctx gas.Context) (string, error) {
 	name, err := sesapi.PathParam(ctx, "EmailIdentity")
 	if err != nil {
@@ -196,7 +205,8 @@ func (m *Module) identityParam(ctx gas.Context) (string, error) {
 	if name == "" {
 		return "", sesapi.ErrBadRequest("You must specify an EmailIdentity.")
 	}
-	return name, nil
+	name = authz.CanonicalIdentity(name)
+	return name, m.authz.Authorize(ctx, authz.Target{Identity: name})
 }
 
 func identityNotFound(err error, name string) error {

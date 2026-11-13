@@ -14,6 +14,7 @@ import (
 
 	"github.com/gasmod/gas"
 
+	"tule.dev/mailbox/internal/authz"
 	"tule.dev/mailbox/internal/contracts"
 	"tule.dev/mailbox/internal/mailmime"
 	"tule.dev/mailbox/internal/sesapi"
@@ -31,12 +32,17 @@ const (
 type Module struct {
 	router *gas.Router
 	store  contracts.MailboxProvider
+	authz  *authz.Authorizer
 }
 
-// NewModule returns a Module serving from store. It registers its routes
-// when the app initializes it.
-func NewModule(router *gas.Router, store contracts.MailboxProvider) *Module {
-	return &Module{router: router, store: store}
+// NewModule returns a Module serving from store, its requests authorized by
+// az. It registers its routes when the app initializes it.
+func NewModule(
+	router *gas.Router,
+	store contracts.MailboxProvider,
+	az *authz.Authorizer,
+) *Module {
+	return &Module{router: router, store: store, authz: az}
 }
 
 // Name identifies the module to gas.
@@ -44,7 +50,9 @@ func (m *Module) Name() string {
 	return moduleName
 }
 
-// Init registers the module's routes.
+// Init registers the module's routes, each guarded by its authorization
+// entry: tule:Inspect on the whole service, which the guard evaluates before
+// the handler runs.
 func (m *Module) Init(context.Context) error {
 	routes := []struct {
 		h      func(gas.Context) error
@@ -60,13 +68,17 @@ func (m *Module) Init(context.Context) error {
 		{m.failures, http.MethodGet, "/_mailbox/rendering-failures"},
 	}
 	for _, r := range routes {
+		op, ok := authz.Lookup(r.method, r.path)
+		if !ok {
+			return fmt.Errorf("mailbox: %s %s has no authorization entry", r.method, r.path)
+		}
 		h := r.h
 		m.router.Handle(m, r.method, r.path, func(ctx gas.Context) error {
 			if err := h(ctx); err != nil {
 				return sesapi.WriteError(ctx, err)
 			}
 			return nil
-		})
+		}, gas.MiddlewareFuncWithName("authz "+op.Name, m.authz.Guard(op)))
 	}
 	return nil
 }

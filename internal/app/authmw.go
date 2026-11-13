@@ -28,7 +28,8 @@ var identityTimeout = 10 * time.Second
 // through, the SES API's and the retrieval API's alike. It knows the
 // configured root key and, when an identity endpoint is configured, every
 // key identity issued, asked of identity on each request after the root key.
-// Any key it accepts may call every operation: there are no permissions.
+// The root key, and identity's root user's, may call every operation; any
+// other key is held to its identity policies by authz, on every route.
 // Requests are accepted signed for ses in any region. Host and X-Amz-Date
 // must be signed, as SigV4 requires of every request; the operation is the
 // method and path, which the signature covers.
@@ -36,6 +37,9 @@ func newVerifier(cfg *Config) (*sigv4.Verifier, error) {
 	root, err := sigv4.NewStaticKey(sigv4.StaticKeyConfig{
 		AccessKeyID:     cfg.Auth.AccessKeyID,
 		SecretAccessKey: cfg.Auth.SecretAccessKey,
+		// The root key acts in the service's account; a principal of any
+		// other account is refused.
+		AccountID: cfg.Mailbox.AccountID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to build the signature verifier: %w", err)

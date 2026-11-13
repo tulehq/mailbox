@@ -134,4 +134,27 @@ CREATE INDEX rendering_failures_failed_at ON rendering_failures (failed_at);
 DROP TABLE rendering_failures;
 `,
 	},
+	{
+		// Domain identities are known by their lower-case names, as SES
+		// compares domains without regard to case; those stored before
+		// that keep the case they were created with, which the lookups no
+		// longer find. Two that differ only by case cannot both be kept:
+		// the migration fails, naming them, and changes nothing. It has no
+		// down SQL, as the original case is not kept.
+		Version:     "0003",
+		Description: "lower-case the names of domain identities",
+		Up: `
+CREATE TEMP TABLE identity_case_clash (names TEXT NOT NULL);
+CREATE TEMP TRIGGER identity_case_clash_abort BEFORE INSERT ON identity_case_clash
+BEGIN
+	SELECT RAISE(ABORT, 'mailbox: these domain identities differ only by case; ' ||
+		'delete all but one of them, then start mailbox again: ' || NEW.names);
+END;
+INSERT INTO identity_case_clash
+	SELECT group_concat(name, ', ') FROM identities
+	WHERE type = 'DOMAIN' GROUP BY lower(name) HAVING count(*) > 1;
+DROP TABLE identity_case_clash;
+UPDATE identities SET name = lower(name) WHERE type = 'DOMAIN' AND name <> lower(name);
+`,
+	},
 }

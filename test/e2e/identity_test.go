@@ -49,6 +49,9 @@ type identityStack struct {
 func TestIdentityIssuedKeys(t *testing.T) {
 	s := startIdentityStack(t)
 	userKey := createUserKey(t, s.iam, "dev")
+	// An identity-issued key is evaluated against its policies: this one
+	// may send and read the mailbox.
+	putUserPolicy(t, s.iam, "dev", allowPolicy("ses:SendEmail", "tule:Inspect"))
 
 	t.Run("a user key sends mail", func(t *testing.T) {
 		id := send(t, sesClientWith(s.srv, userKey),
@@ -109,6 +112,7 @@ func (s *identityStack) testInactiveKey(t *testing.T) {
 
 func (s *identityStack) testDeletedKey(t *testing.T) {
 	key := createUserKey(t, s.iam, "deleted")
+	putUserPolicy(t, s.iam, "deleted", allowPolicy("ses:SendEmail"))
 	send(
 		t,
 		sesClientWith(s.srv, key),

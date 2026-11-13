@@ -300,3 +300,60 @@ func TestBuildGivesAnInlineAttachmentItsContentID(t *testing.T) {
 		t.Fatalf("the inline attachment lacks its Content-ID or disposition:\n%s", msg)
 	}
 }
+
+func TestPrepareRawRefusesASecondFrom(t *testing.T) {
+	msg := []byte("From: a@example.com\r\nFrom: b@example.com\r\nTo: c@example.com\r\n" +
+		"Subject: s\r\n\r\nBody.\r\n")
+	if _, err := PrepareRaw(msg, "id", time.Now()); err == nil {
+		t.Fatal("a message with two From headers was prepared")
+	}
+}
+
+func TestPrepareRawTakesTheFirstSESHeader(t *testing.T) {
+	// "If you include multiple instances of an X-header, Amazon SES uses
+	// only the first instance."
+	msg := []byte("From: a@example.com\r\nTo: c@example.com\r\nSubject: s\r\n" +
+		"X-SES-CONFIGURATION-SET: first\r\nX-SES-CONFIGURATION-SET: second\r\n" +
+		"X-SES-MESSAGE-TAGS: a=1\r\nX-SES-MESSAGE-TAGS: a=2\r\n\r\nBody.\r\n")
+	raw, err := PrepareRaw(msg, "id", time.Now())
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if raw.ConfigurationSet != "first" || raw.Tags != "a=1" {
+		t.Fatalf("configuration set %q, tags %q; want the first of each", raw.ConfigurationSet,
+			raw.Tags)
+	}
+}
+
+func TestPrepareRawRefusesHeaderBytesReadersDisagreeOn(t *testing.T) {
+	const rest = "To: to@example.com\r\nSubject: s\r\n\r\nBody.\r\n"
+	for name, header := range map[string]string{
+		// A reader that ends lines on a bare CR sees a From this parser
+		// would not.
+		"a bare CR hiding a From":    "X-A: x\rFrom: ceo@victim.com\r\nFrom: me@allowed.com\r\n",
+		"a bare CR hiding a Cc":      "From: me@allowed.com\r\nX-A: x\rCc: extra@victim.com\r\n",
+		"a CR before the blank line": "From: me@allowed.com\r\n\r\r\n",
+		"a NUL":                      "From: me@allowed.com\x00\r\n",
+		"a vertical tab":             "X-A: x\vFrom: ceo@victim.com\r\nFrom: me@allowed.com\r\n",
+		"a form feed":                "X-A: x\fy\r\nFrom: me@allowed.com\r\n",
+		"a DEL":                      "X-A: x\x7fy\r\nFrom: me@allowed.com\r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := PrepareRaw([]byte(header+rest), "id", time.Now()); err == nil {
+				t.Fatal("prepared")
+			}
+		})
+	}
+	for name, msg := range map[string]string{
+		"LF line ends":          "From: me@allowed.com\nTo: to@example.com\nSubject: s\n\nBody.\n",
+		"a tab in a value":      "From: me@allowed.com\r\nSubject: a\tb\r\n\r\nBody.\r\n",
+		"a bare CR in the body": "From: me@allowed.com\r\nSubject: s\r\n\r\nBo\rdy.\r\n",
+		"UTF-8 in a value":      "From: me@allowed.com\r\nSubject: caf\xc3\xa9\r\n\r\nBody.\r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := PrepareRaw([]byte(msg), "id", time.Now()); err != nil {
+				t.Fatalf("refused: %v", err)
+			}
+		})
+	}
+}

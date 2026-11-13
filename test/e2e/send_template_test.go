@@ -114,6 +114,28 @@ func TestTemplateByARN(t *testing.T) {
 	requireGreeting(t, mb, id, "Liu", "lion", sent)
 }
 
+func TestATemplateARNElsewhereNamesNoTemplate(t *testing.T) {
+	// The ARN of a template of another account or region names none this
+	// service holds: it is answered as a template that does not exist,
+	// before anything is evaluated on it. A string that is not an SES
+	// template ARN is invalid. SES documents neither answer.
+	c, _ := newClient(t)
+	createTemplate(t, c, "ByArn", greeting)
+	for arn, want := range map[string]func(*testing.T, error){
+		"arn:aws:ses:" + region + ":111111111111:template/ByArn": requireAs[*types.NotFoundException],
+		"arn:aws:ses:eu-west-3:000000000000:template/ByArn":      requireAs[*types.NotFoundException],
+		"arn:aws:sqs:" + region + ":000000000000:template/ByArn": requireAs[*types.BadRequestException],
+		"ByArn": requireAs[*types.BadRequestException],
+	} {
+		t.Run(arn, func(t *testing.T) {
+			want(t, errOf(c.SendEmail(t.Context(), templateInput(&types.Template{
+				TemplateArn:  aws.String(arn),
+				TemplateData: aws.String(`{"name":"Liu","favoriteanimal":"lion"}`),
+			}, "liu.jie@example.com"))))
+		})
+	}
+}
+
 func TestTemplateHTMLIsNotEscaped(t *testing.T) {
 	// "SES doesn't escape HTML content when rendering the HTML template for
 	// a message" (Advanced email personalization).

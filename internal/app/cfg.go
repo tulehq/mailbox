@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"time"
 
 	"github.com/gasmod/gas"
@@ -29,6 +30,34 @@ type authSettings struct {
 	IdentityEndpoint string
 }
 
+// mailboxSettings are the account and region mailbox's resources belong to:
+// the account its ARNs carry and the root key acts in, and the region its
+// ARNs carry and aws:RequestedRegion is. Every signed region verifies, so
+// the region is the service's, never the request's.
+type mailboxSettings struct {
+	AccountID string
+	Region    string
+}
+
+var (
+	accountIDPattern = regexp.MustCompile(`^\d{12}$`)
+	// regionPattern is the shape of an AWS region name, such as us-east-1
+	// or us-gov-west-1.
+	regionPattern = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d+$`)
+)
+
+// checkMailbox holds the account to 12 digits and the region to an AWS
+// region's shape.
+func checkMailbox(m *mailboxSettings) error {
+	if m == nil || !accountIDPattern.MatchString(m.AccountID) {
+		return errors.New("config: Mailbox.AccountID is not 12 digits")
+	}
+	if !regionPattern.MatchString(m.Region) {
+		return fmt.Errorf("config: Mailbox.Region %q is not an AWS region name", m.Region)
+	}
+	return nil
+}
+
 // errNoCredentials is returned when the access key is not configured.
 var errNoCredentials = errors.New("config: TULE_Auth_AccessKeyID and " +
 	"TULE_Auth_SecretAccessKey must be set; every request is verified against them")
@@ -37,9 +66,10 @@ var errNoCredentials = errors.New("config: TULE_Auth_AccessKeyID and " +
 // bound from, which the app registers as the gas.ConfigProvider so services
 // can read settings Config itself does not model.
 type Config struct {
-	HSTS  *hstsSettings
-	Auth  *authSettings
-	Store *sqlimpl.Settings `validate:"required"`
+	HSTS    *hstsSettings
+	Auth    *authSettings
+	Mailbox *mailboxSettings
+	Store   *sqlimpl.Settings `validate:"required"`
 
 	store gas.ConfigProvider
 	Env   config.Environment
@@ -100,6 +130,9 @@ func bindConfig(store gas.ConfigProvider, env config.Environment) (*Config, erro
 		return nil, errNoCredentials
 	}
 	if err := checkIdentityEndpoint(cfg.Auth.IdentityEndpoint); err != nil {
+		return nil, err
+	}
+	if err := checkMailbox(cfg.Mailbox); err != nil {
 		return nil, err
 	}
 
@@ -173,6 +206,11 @@ func applyDefaults(store gas.ConfigProvider) error {
 
 	// Unset, mailbox runs standalone, on the root key alone.
 	setDefault("Auth.IdentityEndpoint", "")
+
+	// The other services' default account, identity's default management
+	// account, so the ARNs agree out of the box.
+	setDefault("Mailbox.AccountID", "000000000000")
+	setDefault("Mailbox.Region", "us-east-1")
 
 	return errors.Join(errs...)
 }

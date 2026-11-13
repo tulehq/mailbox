@@ -176,3 +176,24 @@ func TestLoadConfigChecksTheIdentityEndpoint(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadConfigChecksTheAccountAndRegion(t *testing.T) {
+	for name, env := range map[string][2]string{
+		"short account":  {"TULE_Mailbox_AccountID", "12345"},
+		"letter account": {"TULE_Mailbox_AccountID", "12345678901a"},
+		"bad region":     {"TULE_Mailbox_Region", "Mars"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(env[0], env[1])
+			if _, err := loadEnvConfig(t, "test", "test"); err == nil {
+				t.Fatal("the configuration loaded")
+			}
+		})
+	}
+	t.Setenv("TULE_Mailbox_AccountID", "123456789012")
+	t.Setenv("TULE_Mailbox_Region", "eu-west-1")
+	cfg, err := loadEnvConfig(t, "test", "test")
+	if err != nil || cfg.Mailbox.AccountID != "123456789012" || cfg.Mailbox.Region != "eu-west-1" {
+		t.Fatalf("got %+v, %v", cfg.Mailbox, err)
+	}
+}

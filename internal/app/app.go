@@ -13,6 +13,7 @@ import (
 	"github.com/gasmod/gas/migrate"
 	"tule.dev/sigv4"
 
+	"tule.dev/mailbox/internal/authz"
 	"tule.dev/mailbox/internal/contracts"
 	"tule.dev/mailbox/internal/httpx"
 	"tule.dev/mailbox/internal/modules/email"
@@ -41,7 +42,7 @@ func New(cfg *Config, extra ...gas.Option) (*gas.App, error) {
 	app := gas.NewApp(opts...)
 
 	registerInfraServices(app, cfg, logger)
-	registerAppServices(app)
+	registerAppServices(app, cfg)
 	registerAppModules(app)
 
 	verifier, err := newVerifier(cfg)
@@ -84,8 +85,12 @@ func databaseConfig(store *sqlimpl.Settings) *database.Config {
 	return cfg
 }
 
-func registerAppServices(app *gas.App) {
+func registerAppServices(app *gas.App, cfg *Config) {
 	app.RegisterSingletonService[contracts.MailboxProvider](sqlimpl.NewService)
+	app.RegisterSingletonService[*authz.Authorizer](
+		func(store contracts.MailboxProvider) *authz.Authorizer {
+			return authz.New(store, cfg.Mailbox.AccountID, cfg.Mailbox.Region)
+		})
 }
 
 func registerAppModules(app *gas.App) {

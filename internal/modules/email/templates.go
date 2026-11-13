@@ -9,6 +9,7 @@ import (
 
 	"github.com/gasmod/gas"
 
+	"tule.dev/mailbox/internal/authz"
 	"tule.dev/mailbox/internal/contracts"
 	"tule.dev/mailbox/internal/mailmime"
 	"tule.dev/mailbox/internal/render"
@@ -62,6 +63,8 @@ func templateNotFound(err error, name string) error {
 	return err
 }
 
+// templateParam returns the template the path names, once the request is
+// authorized for it.
 func (m *Module) templateParam(ctx gas.Context) (string, error) {
 	name, err := sesapi.PathParam(ctx, "TemplateName")
 	if err != nil {
@@ -70,7 +73,7 @@ func (m *Module) templateParam(ctx gas.Context) (string, error) {
 	if name == "" {
 		return "", sesapi.ErrBadRequest("You must specify a TemplateName.")
 	}
-	return name, nil
+	return name, m.authz.Authorize(ctx, authz.Target{Template: name})
 }
 
 func (m *Module) createEmailTemplate(ctx gas.Context) error {
@@ -86,6 +89,11 @@ func (m *Module) createEmailTemplate(ctx gas.Context) error {
 		return err
 	}
 	if err = sesapi.Tags(req.Tags); err != nil {
+		return err
+	}
+	if err = m.authz.Authorize(ctx, authz.Target{
+		Template: req.TemplateName, Tags: storeTags(req.Tags),
+	}); err != nil {
 		return err
 	}
 	err = m.store.CreateTemplate(ctx, contracts.Template{
