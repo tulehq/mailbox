@@ -80,30 +80,15 @@ func ErrSerialization(msg string) *Error {
 	return NewError(http.StatusBadRequest, TypeSerialization, msg)
 }
 
-// ErrNotAllowed is the AccessDeniedException of a request no identity-based
-// policy allows, in the form of AWS's messages. The SES v2 SDK model has no
-// AccessDeniedException; the SES v2 Common Errors page gives it, with 403.
-func ErrNotAllowed(callerARN, action, resource string) *Error {
+// ErrAccessDenied is the AccessDeniedException of a request the policies
+// do not allow, in the form of AWS's messages: reason is the phrase that
+// ends it, policy.Reason's Message, such as "because no identity-based
+// policy allows the <action> action" or "with an explicit deny in a
+// resource-based policy". The SES v2 SDK model has no AccessDeniedException;
+// the SES v2 Common Errors page gives it, with 403.
+func ErrAccessDenied(callerARN, action, resource, reason string) *Error {
 	return NewError(http.StatusForbidden, TypeAccessDenied, "User: "+callerARN+
-		" is not authorized to perform: "+action+" on resource: "+resource+
-		" because no identity-based policy allows the "+action+" action")
-}
-
-// ErrExplicitlyDenied is the AccessDeniedException of a request an
-// identity-based policy denies, in the form of AWS's messages.
-func ErrExplicitlyDenied(callerARN, action, resource string) *Error {
-	return NewError(http.StatusForbidden, TypeAccessDenied, "User: "+callerARN+
-		" is not authorized to perform: "+action+" on resource: "+resource+
-		" with an explicit deny in an identity-based policy")
-}
-
-// ErrNoResourcePolicy is the AccessDeniedException of a cross-account
-// request that its identity-based policies allow and no resource-based
-// policy does, in the form of AWS's messages.
-func ErrNoResourcePolicy(callerARN, action, resource string) *Error {
-	return NewError(http.StatusForbidden, TypeAccessDenied, "User: "+callerARN+
-		" is not authorized to perform: "+action+" on resource: "+resource+
-		" because no resource-based policy allows the "+action+" action")
+		" is not authorized to perform: "+action+" on resource: "+resource+" "+reason)
 }
 
 // ErrUnknownOperation is the error for a path and method no operation of
