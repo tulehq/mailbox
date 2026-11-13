@@ -294,6 +294,53 @@ func TestIdentities(t *testing.T) {
 		"delete twice")
 }
 
+func TestIdentityPolicies(t *testing.T) {
+	ctx := t.Context()
+	s := newStore(t)
+	const id = "example.com"
+	p := func(name, doc string) contracts.IdentityPolicy {
+		return contracts.IdentityPolicy{Name: name, Document: doc}
+	}
+	mustIs(t, s.CreateIdentityPolicy(ctx, id, p("a", "{}")), contracts.ErrIdentityNotFound,
+		"create on a missing identity")
+	mustIs(t, s.UpdateIdentityPolicy(ctx, id, p("a", "{}")), contracts.ErrIdentityNotFound,
+		"update on a missing identity")
+	mustIs(t, s.DeleteIdentityPolicy(ctx, id, "a"), contracts.ErrIdentityNotFound,
+		"delete on a missing identity")
+	must(t, s.CreateIdentity(ctx, contracts.Identity{
+		Name: id, Type: contracts.IdentityTypeDomain, CreatedAt: base,
+	}), "create identity")
+
+	must(t, s.CreateIdentityPolicy(ctx, id, p("b", "doc-b")), "create b")
+	must(t, s.CreateIdentityPolicy(ctx, id, p("a", "doc-a")), "create a")
+	mustIs(t, s.CreateIdentityPolicy(ctx, id, p("a", "again")),
+		contracts.ErrIdentityPolicyExists, "create a twice")
+	must(t, s.UpdateIdentityPolicy(ctx, id, p("a", "doc-a2")), "update a")
+	must(t, s.UpdateIdentityPolicy(ctx, id, p("missing", "x")), "update a missing policy")
+	must(t, s.DeleteIdentityPolicy(ctx, id, "missing"), "delete a missing policy")
+
+	got, err := s.GetIdentity(ctx, id)
+	must(t, err, "get")
+	check(t, len(got.Policies) == 2 && got.Policies[0] == p("a", "doc-a2") &&
+		got.Policies[1] == p("b", "doc-b"), "policies = %+v", got.Policies)
+
+	for i := len(got.Policies); i < contracts.MaxIdentityPolicies; i++ {
+		must(t, s.CreateIdentityPolicy(ctx, id, p(fmt.Sprintf("p%02d", i), "{}")), "fill")
+	}
+	mustIs(t, s.CreateIdentityPolicy(ctx, id, p("over", "{}")),
+		contracts.ErrIdentityPolicyLimit, "create past the limit")
+
+	// An identity's policies go with it, and a new identity of the same
+	// name starts with none.
+	must(t, s.DeleteIdentity(ctx, id), "delete identity")
+	must(t, s.CreateIdentity(ctx, contracts.Identity{
+		Name: id, Type: contracts.IdentityTypeDomain, CreatedAt: base,
+	}), "create identity again")
+	got, err = s.GetIdentity(ctx, id)
+	must(t, err, "get again")
+	check(t, len(got.Policies) == 0, "policies of the new identity = %+v", got.Policies)
+}
+
 func TestTemplates(t *testing.T) {
 	ctx := t.Context()
 	s := newStore(t)

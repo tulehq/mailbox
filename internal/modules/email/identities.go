@@ -230,7 +230,7 @@ func (m *Module) getEmailIdentity(ctx gas.Context) error {
 		FeedbackForwardingStatus: true,
 		VerifiedForSendingStatus: true,
 		DkimAttributes:           wireDKIM(id),
-		Policies:                 map[string]string{},
+		Policies:                 wirePolicies(id.Policies),
 		Tags:                     wireTags(id.Tags),
 		ConfigurationSetName:     id.ConfigurationSet,
 		VerificationStatus:       verificationSuccess,

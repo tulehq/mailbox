@@ -21,7 +21,7 @@ require (
 	golang.org/x/text v0.44.0
 	modernc.org/sqlite v1.62.0
 	tule.dev/identity v0.4.0
-	tule.dev/policy v0.2.0
+	tule.dev/policy v0.2.1
 	tule.dev/sigv4 v0.4.1
 )
 

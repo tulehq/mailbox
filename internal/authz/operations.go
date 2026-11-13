@@ -171,6 +171,30 @@ var operations = []Operation{
 		Keys: []string{KeyAPIVersion},
 	},
 	{
+		Name: "CreateEmailIdentityPolicy", Method: http.MethodPost,
+		Path:   "/v2/email/identities/{EmailIdentity}/policies/{PolicyName}",
+		Action: "ses:CreateEmailIdentityPolicy", Resources: identityResource,
+		Keys: []string{KeyAPIVersion},
+	},
+	{
+		Name: "GetEmailIdentityPolicies", Method: http.MethodGet,
+		Path:   "/v2/email/identities/{EmailIdentity}/policies",
+		Action: "ses:GetEmailIdentityPolicies", Resources: identityResource,
+		Keys: []string{KeyAPIVersion},
+	},
+	{
+		Name: "UpdateEmailIdentityPolicy", Method: http.MethodPut,
+		Path:   "/v2/email/identities/{EmailIdentity}/policies/{PolicyName}",
+		Action: "ses:UpdateEmailIdentityPolicy", Resources: identityResource,
+		Keys: []string{KeyAPIVersion},
+	},
+	{
+		Name: "DeleteEmailIdentityPolicy", Method: http.MethodDelete,
+		Path:   "/v2/email/identities/{EmailIdentity}/policies/{PolicyName}",
+		Action: "ses:DeleteEmailIdentityPolicy", Resources: identityResource,
+		Keys: []string{KeyAPIVersion},
+	},
+	{
 		Name: "CreateEmailTemplate", Method: http.MethodPost, Path: "/v2/email/templates",
 		Action: "ses:CreateEmailTemplate", Resources: templateResource,
 		Keys: []string{KeyAPIVersion, KeyRequestTags}, TagsOnCreate: true,
