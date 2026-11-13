@@ -234,6 +234,18 @@ Every request supplies `aws:SourceIp` (the connection's peer address),
 `aws:RequestedRegion` (`TULE_Mailbox_Region`, not the signed region) and
 `aws:PrincipalTag/<key>` for each of the principal's tags. Principal tags
 are the IAM user's or the role's: identity issues no session tags.
+`aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are the organization and
+the account's path in it (`o-.../r-.../ou-.../`, one path, as an account has
+one parent), as identity reports them for a principal whose account is an
+active member of the organization the accounts service knows, or its
+management account; they are absent for any other principal, as AWS leaves
+them out for an account in no organization. Identity keeps an account's
+organization for up to 30 seconds, so an account moved or removed keeps
+its old keys that long. When identity could not ask the accounts service,
+both keys are evaluated as unknown (tule.dev/policy's `Unknown`), never as
+absent: a condition on them then never helps an `Allow` apply and always
+helps a `Deny` apply, so a negated condition such as `StringNotEquals`
+neither grants nor lets a `Deny` lapse.
 `policy.Authorize` supplies the principal's own keys from the attributes
 identity reports (identity v0.5.0, signing-key version 4):
 `aws:PrincipalArn` (a user's ARN, or a role session's role ARN with the
@@ -403,12 +415,6 @@ is supplied to both kinds of policy.
   the grant. Here a recreated user or role does inherit it, until identity
   can resolve unique IDs for the services. A session whose role was deleted
   is denied.
-- **`aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are not supplied**, as
-  identity does not report the organization. A positive condition on them
-  (`StringEquals` and the like) never holds, and a negated one
-  (`StringNotEquals` and the like) always does, so a `Deny` written with a
-  negated operator, such as the guide's "deny everyone outside my
-  organization", denies every evaluated principal.
 - **Service principals never match** a caller, nor do federated-user and
   `CanonicalUser` values: no Tule caller is one. A policy for a service
   principal, such as the guide's Amazon Cognito example, is stored and has
@@ -876,6 +882,11 @@ file. Full-text search uses SQLite's FTS5, which the modernc build includes.
 
 - **identity v0.5.0 or later** (signing-key version 4) is required: the keys
   of an older identity are refused.
+- **`aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are supplied.** A
+  condition on them that never held, or a negated one that always did,
+  now follows the principal's organization; a `Deny` written as "deny
+  everyone outside my organization" no longer denies the organization's
+  own principals.
 
 ## Upgrading from 0.2
 

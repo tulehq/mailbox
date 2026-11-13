@@ -209,9 +209,10 @@ func (a *Authorizer) evaluate(ctx context.Context, c *call, t Target, p sigv4.Pr
 		return err
 	}
 	caller := callerOf(p)
+	unknown := unknownKeys(p)
 	for _, action := range c.op.actions(t) {
 		for _, res := range resources {
-			if err = decide(caller, action, res, keys, policies); err != nil {
+			if err = decide(caller, action, res, keys, unknown, policies); err != nil {
 				return err
 			}
 		}
@@ -231,6 +232,21 @@ func callerOf(p sigv4.Principal) policy.Caller {
 		UserID:       p.UserID,
 		Type:         policy.PrincipalType(p.Type),
 	}
+}
+
+// orgKeys are the organization condition keys: aws:PrincipalOrgID and
+// aws:PrincipalOrgPaths.
+var orgKeys = []string{"aws:PrincipalOrgID", "aws:PrincipalOrgPaths"}
+
+// unknownKeys are the condition keys whose values the principal's KeySource
+// could not tell: the organization keys when identity could not ask the
+// accounts service. They are evaluated as unknown, never as absent, since
+// an absent key satisfies a negated operator such as StringNotEquals.
+func unknownKeys(p sigv4.Principal) []string {
+	if p.OrgUnknown {
+		return orgKeys
+	}
+	return nil
 }
 
 // requestKeys are the request's condition keys, held to the bounds with the
@@ -266,6 +282,7 @@ func decide(
 	action string,
 	res resource,
 	keys map[string][]string,
+	unknown []string,
 	identity []*policy.Policy,
 ) error {
 	req := policy.AuthorizeRequest{
@@ -274,6 +291,7 @@ func decide(
 		ResourceAccount: res.account,
 		Caller:          caller,
 		Context:         contextFor(keys, res),
+		Unknown:         unknown,
 	}
 	az := authorize(req, res.policies, identity)
 	if az.Decision != policy.ExplicitDeny {
@@ -804,6 +822,10 @@ func (a *Authorizer) templateTags(ctx context.Context, name string) ([]contracts
 // aws:userid, aws:PrincipalType and aws:username are not among them:
 // policy.Authorize supplies them from the caller (callerOf).
 // aws:PrincipalTag/<key> is each of the principal's tags.
+// aws:PrincipalOrgID and aws:PrincipalOrgPaths are the principal's
+// organization and its account's path in it, absent when its account is in
+// no organization; when they are not known they are left out here and
+// passed as unknown (unknownKeys).
 func globalKeys(
 	r *http.Request,
 	p sigv4.Principal,
@@ -819,6 +841,12 @@ func globalKeys(
 	}
 	for k, v := range p.Tags {
 		keys["aws:PrincipalTag/"+k] = []string{v}
+	}
+	if p.OrgID != "" {
+		keys["aws:PrincipalOrgID"] = []string{p.OrgID}
+	}
+	if len(p.OrgPaths) > 0 {
+		keys["aws:PrincipalOrgPaths"] = p.OrgPaths
 	}
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		keys["aws:SourceIp"] = []string{host}
