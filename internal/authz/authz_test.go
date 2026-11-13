@@ -524,6 +524,14 @@ func TestThePrincipalsKeysComeFromItsAttributes(t *testing.T) {
 			}(),
 			deny: `{"StringEquals":{"aws:PrincipalTag/team":"web"}}`,
 		},
+		{
+			name: "aws:PrincipalOrgID", p: orgMember(user()),
+			deny: `{"StringEquals":{"aws:PrincipalOrgID":"` + testOrg + `"}}`,
+		},
+		{
+			name: "aws:PrincipalOrgPaths", p: orgMember(user()),
+			deny: `{"ForAnyValue:StringLike":{"aws:PrincipalOrgPaths":"` + testOrg + `/r-ab12/*"}}`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := tc.p
@@ -536,6 +544,72 @@ func TestThePrincipalsKeysComeFromItsAttributes(t *testing.T) {
 				"ses:GetAccount on resource: * with an explicit deny in an identity-based policy")
 		})
 	}
+}
+
+// testOrg is the organization orgMember puts a principal's account in.
+const testOrg = "o-a1b2c3d4e5"
+
+// orgMember is p with its account in testOrg, under an OU.
+func orgMember(p sigv4.Principal) sigv4.Principal {
+	p.OrgID = testOrg
+	p.OrgPaths = []string{testOrg + "/r-ab12/ou-ab12-11111111/"}
+	return p
+}
+
+// TestUnknownOrganizationKeysFailClosed holds a principal whose
+// organization identity could not tell to the organization keys as
+// unknown: a negated condition on them neither grants nor lets a Deny
+// lapse, as it would were the keys absent.
+func TestUnknownOrganizationKeysFailClosed(t *testing.T) {
+	unknown := func(policies ...json.RawMessage) sigv4.Principal {
+		p := user(policies...)
+		p.OrgUnknown = true
+		return p
+	}
+	for _, tc := range []struct {
+		name, message string
+		policy        json.RawMessage
+	}{
+		{
+			name: "an Allow outside an organization does not grant",
+			policy: doc(`{"Effect":"Allow","Action":"ses:GetAccount","Resource":"*",` +
+				`"Condition":{"StringNotEquals":{"aws:PrincipalOrgID":"` + testOrg + `"}}}`),
+			message: notAllowed("ses:GetAccount", "*"),
+		},
+		{
+			name: "a Deny outside an organization applies",
+			policy: doc(`{"Effect":"Allow","Action":"ses:GetAccount","Resource":"*"}`,
+				`{"Effect":"Deny","Action":"*","Resource":"*","Condition":`+
+					`{"ForAllValues:StringNotLike":{"aws:PrincipalOrgPaths":"`+testOrg+`/*"}}}`),
+			message: "User: " + userARN + " is not authorized to perform: ses:GetAccount on " +
+				"resource: * with an explicit deny in an identity-based policy",
+		},
+		{
+			name: "a Deny on the organization applies",
+			policy: doc(`{"Effect":"Allow","Action":"ses:GetAccount","Resource":"*"}`,
+				`{"Effect":"Deny","Action":"*","Resource":"*","Condition":`+
+					`{"StringEquals":{"aws:PrincipalOrgID":"`+testOrg+`"}}}`),
+			message: "User: " + userARN + " is not authorized to perform: ses:GetAccount on " +
+				"resource: * with an explicit deny in an identity-based policy",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, "GetAccount", keys{"KEY": unknown(tc.policy)}, &store{})
+			h.skip = true
+			status, e := h.call("KEY")
+			requireDenied(t, status, e, tc.message)
+		})
+	}
+	t.Run("a principal outside any organization is granted by the negated Allow",
+		func(t *testing.T) {
+			p := user(doc(`{"Effect":"Allow","Action":"ses:GetAccount","Resource":"*",` +
+				`"Condition":{"StringNotEquals":{"aws:PrincipalOrgID":"` + testOrg + `"}}}`))
+			h := newHarness(t, "GetAccount", keys{"KEY": p}, &store{})
+			h.skip = true
+			if status, e := h.call("KEY"); status != http.StatusOK {
+				t.Fatalf("got %d %+v, want 200", status, e)
+			}
+		})
 }
 
 func TestASessionWhoseRoleWasDeletedIsDenied(t *testing.T) {
@@ -556,9 +630,12 @@ func TestGlobalKeys(t *testing.T) {
 	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.FixedZone("x", 3600))
 	p := user()
 	p.Tags = map[string]string{"team": "mail"}
+	p = orgMember(p)
 	got := globalKeys(r, p, testRegion, now)
 	want := map[string][]string{
 		"aws:PrincipalTag/team": {"mail"},
+		"aws:PrincipalOrgID":    {testOrg},
+		"aws:PrincipalOrgPaths": {testOrg + "/r-ab12/ou-ab12-11111111/"},
 		"aws:CurrentTime":       {"2026-11-13T09:00:00Z"},
 		"aws:EpochTime":         {"1794560400"},
 		"aws:SecureTransport":   {"true"},
