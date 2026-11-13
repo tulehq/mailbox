@@ -20,9 +20,15 @@ import (
 // fromName are the bare address and the display name of from, and
 // feedbackAddress the bare address of feedback. headerFrom is a raw
 // message's From header when the request gives FromEmailAddress as well: a
-// second sender the send is authorized for.
+// second sender the send is authorized for. The ARNs are the sending
+// authorization identities the send names for its sender, its From header
+// and its feedback address, each to be checked against the identity of
+// that address (authz.CheckIdentityARN).
 type envelope struct {
 	headerFrom      *mail.Address
+	fromARNs        []identityARN
+	headerFromARNs  []identityARN
+	feedbackARN     *identityARN
 	from            string
 	fromAddress     string
 	fromName        string
@@ -31,6 +37,55 @@ type envelope struct {
 	configSet       string
 	replyTo         []string
 	tags            []contracts.MessageTag
+}
+
+// identityARN is a sending authorization ARN and the member or header that
+// gave it.
+type identityARN struct {
+	field, arn string
+}
+
+// identityARNs are a send's sending authorization ARN members: the ARN of
+// the identity of its FromEmailAddress and of its
+// FeedbackForwardingEmailAddress. An empty one is invalid, as the model
+// gives each a length of 1 at least.
+func identityARNs(env *envelope, from, feedback *string) error {
+	if from != nil {
+		if *from == "" {
+			return sesapi.ErrBadRequest("FromEmailAddressIdentityArn must not be empty.")
+		}
+		env.fromARNs = []identityARN{{"FromEmailAddressIdentityArn", *from}}
+	}
+	if feedback != nil {
+		if *feedback == "" || env.feedbackAddress == "" {
+			return sesapi.ErrBadRequest("FeedbackForwardingEmailAddressIdentityArn needs " +
+				"a FeedbackForwardingEmailAddress, and must not be empty.")
+		}
+		env.feedbackARN = &identityARN{"FeedbackForwardingEmailAddressIdentityArn", *feedback}
+	}
+	return nil
+}
+
+// checkIdentityARNs checks each sending authorization ARN of env against the
+// identity of its address, before the send is authorized.
+func (m *Module) checkIdentityARNs(ctx gas.Context, env envelope) error {
+	for _, a := range env.fromARNs {
+		if err := m.authz.CheckIdentityARN(ctx, a.field, a.arn, env.fromAddress); err != nil {
+			return err
+		}
+	}
+	if env.headerFrom != nil {
+		for _, a := range env.headerFromARNs {
+			if err := m.authz.CheckIdentityARN(ctx, a.field, a.arn,
+				env.headerFrom.Address); err != nil {
+				return err
+			}
+		}
+	}
+	if a := env.feedbackARN; a != nil {
+		return m.authz.CheckIdentityARN(ctx, a.field, a.arn, env.feedbackAddress)
+	}
+	return nil
 }
 
 // envelopeOf checks the sender, reply-to and feedback addresses, and the
@@ -143,6 +198,10 @@ func (m *Module) sendEmail(ctx gas.Context) error {
 	if err != nil {
 		return err
 	}
+	if err = identityARNs(&env, req.FromEmailAddressIdentityArn,
+		req.FeedbackForwardingEmailAddressIdentityArn); err != nil {
+		return err
+	}
 	now := m.now()
 	id, err := mailmime.NewMessageID(now)
 	if err != nil {
@@ -248,6 +307,9 @@ func (m *Module) authorizeSend(
 	}
 	if env.headerFrom != nil {
 		t.HeaderSender, t.HeaderSenderDisplayName = env.headerFrom.Address, env.headerFrom.Name
+	}
+	if err := m.checkIdentityARNs(ctx, env); err != nil {
+		return err
 	}
 	return m.authz.Authorize(ctx, t)
 }
@@ -578,9 +640,11 @@ func (m *Module) raw(
 }
 
 // rawEnvelope fills in what the request leaves out of env from the raw
-// message: its sender, configuration set and tags.
+// message: its sender, configuration set, tags and sending authorization
+// ARNs.
 func rawEnvelope(env envelope, prepared *mailmime.Raw) (envelope, error) {
 	var err error
+	fromHeader := env.from == ""
 	switch {
 	case env.from == "":
 		if env.from, env.fromAddress, env.fromName, err = rawSender(prepared.From); err != nil {
@@ -601,7 +665,35 @@ func rawEnvelope(env envelope, prepared *mailmime.Raw) (envelope, error) {
 			return env, err
 		}
 	}
+	rawARNs(&env, prepared, fromHeader)
 	return env, nil
+}
+
+// rawARNs takes a raw message's X-SES-SOURCE-ARN and X-SES-FROM-ARN headers
+// as the ARNs of its senders' identities, unless the request gives
+// FromEmailAddressIdentityArn: "For Raw emails, the
+// FromEmailAddressIdentityArn value overrides the X-SES-SOURCE-ARN and
+// X-SES-FROM-ARN headers specified in raw email message content." (SES API
+// v2 Reference, SendEmail). X-SES-SOURCE-ARN is the envelope sender's,
+// X-SES-FROM-ARN the From header's; when the From header is the sender
+// (fromHeader, no FromEmailAddress) both are its. X-SES-RETURN-PATH-ARN is
+// removed and not read: a raw message's feedback address is only ever the
+// request's FeedbackForwardingEmailAddress.
+func rawARNs(env *envelope, prepared *mailmime.Raw, fromHeader bool) {
+	if len(env.fromARNs) > 0 {
+		return
+	}
+	add := func(dst *[]identityARN, field, arn string) {
+		if arn != "" {
+			*dst = append(*dst, identityARN{field, arn})
+		}
+	}
+	add(&env.fromARNs, "X-SES-SOURCE-ARN", prepared.SourceARN)
+	if fromHeader || env.headerFrom == nil {
+		add(&env.fromARNs, "X-SES-FROM-ARN", prepared.FromARN)
+		return
+	}
+	add(&env.headerFromARNs, "X-SES-FROM-ARN", prepared.FromARN)
 }
 
 // rawSender is the sender of a raw message sent without FromEmailAddress:

@@ -2,31 +2,36 @@ package sesapi
 
 // The request bodies of the in-scope operations, as the SES v2 API model
 // names their members. Members this service does not act on (EndpointId,
-// TenantName, ListManagementOptions, ConfigurationOverrides and the sending
-// authorization ARNs) are left out: they are decoded and ignored, as any
-// unknown member is. Blobs are base64 in JSON, which encoding/json decodes
+// TenantName, ListManagementOptions and ConfigurationOverrides) are left
+// out: they are decoded and ignored, as any unknown member is. Blobs are base64 in JSON, which encoding/json decodes
 // into []byte.
 
 // SendEmailRequest is the body of SendEmail.
 type SendEmailRequest struct {
-	FromEmailAddress               *string       `json:"FromEmailAddress"`
-	Destination                    *Destination  `json:"Destination"`
-	FeedbackForwardingEmailAddress *string       `json:"FeedbackForwardingEmailAddress"`
-	Content                        *EmailContent `json:"Content"`
-	ConfigurationSetName           *string       `json:"ConfigurationSetName"`
-	ReplyToAddresses               []string      `json:"ReplyToAddresses"`
-	EmailTags                      []MessageTag  `json:"EmailTags"`
+	FromEmailAddress            *string `json:"FromEmailAddress"`
+	FromEmailAddressIdentityArn *string `json:"FromEmailAddressIdentityArn"`
+	//nolint:lll,revive // the model's member name
+	FeedbackForwardingEmailAddressIdentityArn *string       `json:"FeedbackForwardingEmailAddressIdentityArn"`
+	Destination                               *Destination  `json:"Destination"`
+	FeedbackForwardingEmailAddress            *string       `json:"FeedbackForwardingEmailAddress"`
+	Content                                   *EmailContent `json:"Content"`
+	ConfigurationSetName                      *string       `json:"ConfigurationSetName"`
+	ReplyToAddresses                          []string      `json:"ReplyToAddresses"`
+	EmailTags                                 []MessageTag  `json:"EmailTags"`
 }
 
 // SendBulkEmailRequest is the body of SendBulkEmail.
 type SendBulkEmailRequest struct {
-	FromEmailAddress               *string           `json:"FromEmailAddress"`
-	FeedbackForwardingEmailAddress *string           `json:"FeedbackForwardingEmailAddress"`
-	DefaultContent                 *BulkEmailContent `json:"DefaultContent"`
-	ConfigurationSetName           *string           `json:"ConfigurationSetName"`
-	ReplyToAddresses               []string          `json:"ReplyToAddresses"`
-	DefaultEmailTags               []MessageTag      `json:"DefaultEmailTags"`
-	BulkEmailEntries               []BulkEmailEntry  `json:"BulkEmailEntries"`
+	FromEmailAddress            *string `json:"FromEmailAddress"`
+	FromEmailAddressIdentityArn *string `json:"FromEmailAddressIdentityArn"`
+	//nolint:lll,revive // the model's member name
+	FeedbackForwardingEmailAddressIdentityArn *string           `json:"FeedbackForwardingEmailAddressIdentityArn"`
+	FeedbackForwardingEmailAddress            *string           `json:"FeedbackForwardingEmailAddress"`
+	DefaultContent                            *BulkEmailContent `json:"DefaultContent"`
+	ConfigurationSetName                      *string           `json:"ConfigurationSetName"`
+	ReplyToAddresses                          []string          `json:"ReplyToAddresses"`
+	DefaultEmailTags                          []MessageTag      `json:"DefaultEmailTags"`
+	BulkEmailEntries                          []BulkEmailEntry  `json:"BulkEmailEntries"`
 }
 
 // Destination holds a message's recipients.

@@ -13,17 +13,22 @@ import (
 const (
 	headerConfigurationSet = "X-Ses-Configuration-Set"
 	headerMessageTags      = "X-Ses-Message-Tags"
+	headerSourceARN        = "X-Ses-Source-Arn"
+	headerFromARN          = "X-Ses-From-Arn"
+	headerReturnPathARN    = "X-Ses-Return-Path-Arn"
 )
 
 // sesHeaders are the X-SES headers SES documents removing from a raw message.
 var sesHeaders = []string{
 	headerConfigurationSet, headerMessageTags,
-	"X-Ses-Source-Arn", "X-Ses-From-Arn", "X-Ses-Return-Path-Arn",
+	headerSourceARN, headerFromARN, headerReturnPathARN,
 }
 
 // Raw is a raw message as SES sends it, and what SES read from its header.
-// From, To, Cc and Bcc are the header values, unparsed; ConfigurationSet and
-// Tags are the X-SES headers' values.
+// From, To, Cc and Bcc are the header values, unparsed; ConfigurationSet,
+// Tags and the ARNs are the X-SES headers' values: SourceARN, FromARN and
+// ReturnPathARN are the sending authorization identities of the envelope
+// sender, the From header and the return path.
 type Raw struct {
 	From             string
 	To               string
@@ -31,6 +36,9 @@ type Raw struct {
 	Bcc              string
 	ConfigurationSet string
 	Tags             string
+	SourceARN        string
+	FromARN          string
+	ReturnPathARN    string
 	MIME             []byte
 	// froms counts the From fields, of which SES takes one only.
 	froms int
@@ -102,21 +110,35 @@ func (r *Raw) read(f field) bool {
 		return false
 	case "Message-Id", "Date":
 		return false
+	}
 	// "If you include multiple instances of an X-header, Amazon SES uses only
 	// the first instance" (SES Developer Guide, Using sending authorization
 	// with Amazon SES, X-headers).
-	case headerConfigurationSet:
-		if r.ConfigurationSet == "" {
-			r.ConfigurationSet = f.value
-		}
-		return false
-	case headerMessageTags:
-		if r.Tags == "" {
-			r.Tags = f.value
+	if dst := r.xHeader(name); dst != nil {
+		if *dst == "" {
+			*dst = f.value
 		}
 		return false
 	}
 	return !slices.Contains(sesHeaders, name)
+}
+
+// xHeader is where the X-SES header of the canonical name is kept, or nil
+// for any other header.
+func (r *Raw) xHeader(name string) *string {
+	switch name {
+	case headerConfigurationSet:
+		return &r.ConfigurationSet
+	case headerMessageTags:
+		return &r.Tags
+	case headerSourceARN:
+		return &r.SourceARN
+	case headerFromARN:
+		return &r.FromARN
+	case headerReturnPathARN:
+		return &r.ReturnPathARN
+	}
+	return nil
 }
 
 func canonical(name string) string {

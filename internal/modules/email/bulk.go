@@ -76,14 +76,9 @@ func (m *Module) checkBulk(
 			"BulkEmailEntries must have 1 to %d entries.", sesapi.MaxBulkEntries))
 	}
 	t := req.DefaultContent.Template
-	env, err := envelopeOf(req.FromEmailAddress, req.ReplyToAddresses,
-		req.FeedbackForwardingEmailAddress, req.ConfigurationSetName, "DefaultEmailTags",
-		req.DefaultEmailTags)
+	env, err := bulkEnvelope(req)
 	if err != nil {
 		return nil, err
-	}
-	if env.from == "" {
-		return nil, sesapi.ErrBadRequest("You must specify a FromEmailAddress.")
 	}
 	if err = checkTemplateParts("DefaultContent.Template", t); err != nil {
 		return nil, err
@@ -98,6 +93,22 @@ func (m *Module) checkBulk(
 	return d, nil
 }
 
+// bulkEnvelope checks a SendBulkEmail's sender, reply-to and feedback
+// addresses, its default tags and its sending authorization ARNs.
+func bulkEnvelope(req *sesapi.SendBulkEmailRequest) (envelope, error) {
+	env, err := envelopeOf(req.FromEmailAddress, req.ReplyToAddresses,
+		req.FeedbackForwardingEmailAddress, req.ConfigurationSetName, "DefaultEmailTags",
+		req.DefaultEmailTags)
+	if err != nil {
+		return env, err
+	}
+	if env.from == "" {
+		return env, sesapi.ErrBadRequest("You must specify a FromEmailAddress.")
+	}
+	return env, identityARNs(&env, req.FromEmailAddressIdentityArn,
+		req.FeedbackForwardingEmailAddressIdentityArn)
+}
+
 // bulkTemplate authorizes a SendBulkEmail and returns the name and content
 // of its template. The resources it is evaluated on are the request's,
 // shared by every entry: the reference lists no recipient or sender keys for
@@ -109,6 +120,9 @@ func (m *Module) bulkTemplate(
 ) (string, contracts.TemplateContent, error) {
 	name, content, err := m.templateSource(t)
 	if err != nil {
+		return "", content, err
+	}
+	if err = m.checkIdentityARNs(ctx, env); err != nil {
 		return "", content, err
 	}
 	if err = m.authz.Authorize(ctx, authz.Target{
