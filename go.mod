@@ -6,6 +6,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.48.0
 	github.com/aws/aws-sdk-go-v2/credentials v1.21.0
 	github.com/aws/aws-sdk-go-v2/service/iam v1.65.0
+	github.com/aws/aws-sdk-go-v2/service/organizations v1.62.8
 	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.79.9
 	github.com/aws/aws-sdk-go-v2/service/sts v1.52.0
 	github.com/aws/smithy-go v1.28.9
@@ -20,9 +21,9 @@ require (
 	github.com/rs/zerolog v1.35.1
 	golang.org/x/text v0.44.0
 	modernc.org/sqlite v1.62.0
-	tule.dev/identity v0.4.0
-	tule.dev/policy v0.2.1
-	tule.dev/sigv4 v0.4.1
+	tule.dev/identity v0.5.0
+	tule.dev/policy v0.3.0
+	tule.dev/sigv4 v0.5.0
 )
 
 require (
@@ -34,7 +35,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.12 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.25 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.12 // indirect
-	github.com/aws/aws-sdk-go-v2/service/organizations v1.62.8 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.13.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.39.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.5 // indirect

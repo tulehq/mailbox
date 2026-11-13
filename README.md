@@ -59,7 +59,7 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Server_ShutdownTimeout` | `7s` | How long a graceful shutdown waits for in-flight requests |
 | `TULE_Auth_AccessKeyID` | required | The access key clients sign requests with |
 | `TULE_Auth_SecretAccessKey` | required | Its secret |
-| `TULE_Auth_IdentityEndpoint` | unset | The identity service's base URL, such as `http://localhost:9030`: an absolute http or https URL. Set, the keys identity issued are accepted as well as the configured key, held to their identity policies ([Permissions](#permissions)), and identity is asked about them with the configured key, which must be identity's root key. Identity 0.4.0 or later is required. Unset, mailbox runs standalone on the configured key alone |
+| `TULE_Auth_IdentityEndpoint` | unset | The identity service's base URL, such as `http://localhost:9030`: an absolute http or https URL. Set, the keys identity issued are accepted as well as the configured key, held to their identity policies ([Permissions](#permissions)), and identity is asked about them with the configured key, which must be identity's root key. Identity 0.5.0 or later is required. Unset, mailbox runs standalone on the configured key alone |
 | `TULE_Mailbox_AccountID` | `000000000000` | The account mailbox's resources belong to: 12 digits. The root key acts in it and the ARNs carry it; a principal of any other account needs an email identity's sending authorization policy as well as its own identity policy (see Sending authorization). The default is identity's default management account |
 | `TULE_Mailbox_Region` | `us-east-1` | The region the ARNs carry and `aws:RequestedRegion` is, whatever region a request was signed for |
 | `TULE_GasEnv` | | `development` logs console output at trace level, `production` logs at warn level, `testing` disables logging |
@@ -235,7 +235,7 @@ Every request supplies `aws:SourceIp` (the connection's peer address),
 `aws:PrincipalTag/<key>` for each of the principal's tags. Principal tags
 are the IAM user's or the role's: identity issues no session tags.
 `policy.Authorize` supplies the principal's own keys from the attributes
-identity reports (identity v0.4.0, signing-key version 3):
+identity reports (identity v0.5.0, signing-key version 4):
 `aws:PrincipalArn` (a user's ARN, or a role session's role ARN with the
 role's path, so `arn:aws:iam::*:role/restricted/*` matches a session of
 `role/restricted/admin`), `aws:PrincipalAccount`, `aws:userid` (`AIDA...`,
@@ -872,6 +872,11 @@ file. Full-text search uses SQLite's FTS5, which the modernc build includes.
   trusted, since nothing is expected in front of this service and the header
   is unsigned.
 
+## Upgrading from 0.3
+
+- **identity v0.5.0 or later** (signing-key version 4) is required: the keys
+  of an older identity are refused.
+
 ## Upgrading from 0.2
 
 - **Cross-account requests are evaluated.** 0.2 refused every principal of
@@ -937,8 +942,8 @@ services, built from their checkouts and run as processes, identity pointed
 back at the app under test and at accounts for a member account. The
 checkouts are mailbox's siblings, `../identity` and `../accounts`, by
 default, or the directories `TULE_E2E_IDENTITY_DIR` and
-`TULE_E2E_ACCOUNTS_DIR` name; CI checks out `tulehq/identity` at v0.4.0 and
-`tulehq/accounts` at v0.1.1 and sets them. Without a checkout those tests
+`TULE_E2E_ACCOUNTS_DIR` name; CI checks out `tulehq/identity` at v0.5.0 and
+`tulehq/accounts` at v0.4.0 and sets them. Without a checkout those tests
 fail rather than being skipped. They include the permission tests, which give
 identity's users and roles policies through the IAM SDK and check what
 mailbox allows and denies.
