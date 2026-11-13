@@ -127,9 +127,12 @@ across accounts, with [tule.dev/policy](https://github.com/tulehq/policy)'s
   session whose role was deleted (an empty `PrincipalArn`) is denied with
   "... because no identity-based policy allows ...". A principal marked
   `Root` that is not of type `Account`, or one of type `Account` not marked
-  `Root`, is refused with `500` `InternalFailure` and logged, since `Root`
-  skips evaluation and `Account` grants full identity access: identity keeps
-  the two in step, and a principal on which they disagree is a fault. A
+  `Root`, is refused with `500` `InternalFailure` and logged, in mailbox's
+  own account too: the check runs before the root's shortcut, since `Root`
+  skips evaluation and `Account` grants full identity access. identity keeps
+  the two in step, and mailbox's configured key is built with the account's
+  root ARN, so its type is `Account`; a principal on which they disagree is
+  a fault. A
   stored policy that no longer parses also fails its request with `500`.
 
 **This was a breaking change in 0.2.** A key identity issued used to be able
