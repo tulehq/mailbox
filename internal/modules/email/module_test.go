@@ -32,16 +32,16 @@ func TestAWriteWaitsForTheOperationInFlight(t *testing.T) {
 		order = append(order, s)
 	}
 	authorized, release := make(chan struct{}), make(chan struct{})
-	read := m.serve(func(gas.Context) error {
+	read := m.serve(whole(func(gas.Context) error {
 		close(authorized)
 		<-release
 		record("act")
 		return nil
-	}, false)
-	write := m.serve(func(gas.Context) error {
+	}), false)
+	write := m.serve(whole(func(gas.Context) error {
 		record("write")
 		return nil
-	}, true)
+	}), true)
 
 	readDone := make(chan struct{})
 	go func() {

@@ -216,21 +216,21 @@ func identityNotFound(err error, name string) error {
 	return err
 }
 
-func (m *Module) getEmailIdentity(ctx gas.Context) error {
-	name, err := m.identityParam(ctx)
+func (m *Module) getEmailIdentity(ctx gas.Context, locked func(func() error) error) error {
+	id, err := m.readIdentity(ctx, locked)
 	if err != nil {
 		return err
 	}
-	id, err := m.store.GetIdentity(ctx, name)
+	policies, err := m.showPolicies(ctx, id.Policies)
 	if err != nil {
-		return identityNotFound(err, name)
+		return err
 	}
 	return sesapi.Write(ctx, sesapi.GetEmailIdentityResponse{
 		IdentityType:             id.Type,
 		FeedbackForwardingStatus: true,
 		VerifiedForSendingStatus: true,
 		DkimAttributes:           wireDKIM(id),
-		Policies:                 wirePolicies(id.Policies),
+		Policies:                 policies,
 		Tags:                     wireTags(id.Tags),
 		ConfigurationSetName:     id.ConfigurationSet,
 		VerificationStatus:       verificationSuccess,
