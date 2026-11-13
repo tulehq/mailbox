@@ -20,6 +20,14 @@ var (
 	// identities exist already.
 	ErrIdentityLimit = errors.New("mailbox: identity limit reached")
 
+	// ErrIdentityPolicyExists is returned by CreateIdentityPolicy for a
+	// policy name the identity has already.
+	ErrIdentityPolicyExists = errors.New("mailbox: identity policy already exists")
+
+	// ErrIdentityPolicyLimit is returned by CreateIdentityPolicy when the
+	// identity has MaxIdentityPolicies policies already.
+	ErrIdentityPolicyLimit = errors.New("mailbox: identity policy limit reached")
+
 	// ErrTemplateNotFound is returned when no template has the given name.
 	ErrTemplateNotFound = errors.New("mailbox: template not found")
 
@@ -50,6 +58,10 @@ const (
 	MaxIdentities = 10000
 	// MaxTemplates is how many templates may exist in a Region.
 	MaxTemplates = 20000
+	// MaxIdentityPolicies is how many sending authorization policies an
+	// identity may have: "Identity owners can associate up to 20 policies
+	// with each unique identity" (SES Developer Guide, "Policy anatomy").
+	MaxIdentityPolicies = 20
 )
 
 // The identity types.
@@ -74,7 +86,20 @@ type MailboxProvider interface {
 	CreateIdentity(ctx context.Context, in Identity) error
 	GetIdentity(ctx context.Context, name string) (*Identity, error)
 	ListIdentities(ctx context.Context, f IdentityFilter, page PageInput) (*Page[Identity], error)
+	// DeleteIdentity deletes the identity and its policies.
 	DeleteIdentity(ctx context.Context, name string) error
+
+	// CreateIdentityPolicy adds a sending authorization policy to the
+	// identity: ErrIdentityNotFound, ErrIdentityPolicyExists or
+	// ErrIdentityPolicyLimit when it cannot.
+	CreateIdentityPolicy(ctx context.Context, identity string, p IdentityPolicy) error
+	// UpdateIdentityPolicy replaces the document of the identity's policy
+	// of p's name. The identity must exist; a policy it does not have is
+	// left as it is, not added.
+	UpdateIdentityPolicy(ctx context.Context, identity string, p IdentityPolicy) error
+	// DeleteIdentityPolicy deletes the identity's policy of that name, if it
+	// has one. The identity must exist.
+	DeleteIdentityPolicy(ctx context.Context, identity, name string) error
 
 	CreateTemplate(ctx context.Context, in Template) error
 	GetTemplate(ctx context.Context, name string) (*Template, error)
@@ -115,6 +140,9 @@ type Tag struct {
 
 // Identity is an email address or a domain. It is verified from the moment
 // it is created. DKIM holds what GetEmailIdentity reports of its signing.
+// Policies are its sending authorization policies, in name order, read by
+// GetIdentity in the same transaction as the rest of it; ListIdentities
+// leaves them out.
 type Identity struct {
 	CreatedAt        time.Time
 	Name             string
@@ -122,6 +150,14 @@ type Identity struct {
 	ConfigurationSet string
 	DKIM             DKIM
 	Tags             []Tag
+	Policies         []IdentityPolicy
+}
+
+// IdentityPolicy is one of an identity's sending authorization policies: a
+// resource-based policy document, by name.
+type IdentityPolicy struct {
+	Name     string
+	Document string
 }
 
 // DKIM is an identity's DKIM setup: Easy DKIM (origin AWS_SES) with a key

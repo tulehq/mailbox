@@ -180,3 +180,10 @@ type UpdateEmailTemplateRequest struct {
 type TestRenderEmailTemplateRequest struct {
 	TemplateData *string `json:"TemplateData"`
 }
+
+// IdentityPolicyRequest is the body of CreateEmailIdentityPolicy and
+// UpdateEmailIdentityPolicy; the identity and the policy name are in the
+// path.
+type IdentityPolicyRequest struct {
+	Policy *string `json:"Policy"`
+}

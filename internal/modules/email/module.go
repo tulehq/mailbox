@@ -57,7 +57,7 @@ func (m *Module) Init(context.Context) error {
 		method string
 		path   string
 		// writes marks an operation that creates, changes or deletes an
-		// identity or a template.
+		// identity, an identity's policy or a template.
 		writes bool
 	}{
 		{m.sendEmail, http.MethodPost, "/v2/email/outbound-emails", false},
@@ -70,6 +70,30 @@ func (m *Module) Init(context.Context) error {
 		{m.listEmailIdentitiesByQuery, http.MethodGet, "/v2/email/identities", false},
 		{m.getEmailIdentity, http.MethodGet, "/v2/email/identities/{EmailIdentity}", false},
 		{m.deleteEmailIdentity, http.MethodDelete, "/v2/email/identities/{EmailIdentity}", true},
+		{
+			m.createEmailIdentityPolicy,
+			http.MethodPost,
+			"/v2/email/identities/{EmailIdentity}/policies/{PolicyName}",
+			true,
+		},
+		{
+			m.getEmailIdentityPolicies,
+			http.MethodGet,
+			"/v2/email/identities/{EmailIdentity}/policies",
+			false,
+		},
+		{
+			m.updateEmailIdentityPolicy,
+			http.MethodPut,
+			"/v2/email/identities/{EmailIdentity}/policies/{PolicyName}",
+			true,
+		},
+		{
+			m.deleteEmailIdentityPolicy,
+			http.MethodDelete,
+			"/v2/email/identities/{EmailIdentity}/policies/{PolicyName}",
+			true,
+		},
 		{m.createEmailTemplate, http.MethodPost, "/v2/email/templates", true},
 		{m.listEmailTemplates, http.MethodGet, "/v2/email/templates", false},
 		{m.getEmailTemplate, http.MethodGet, "/v2/email/templates/{TemplateName}", false},
@@ -100,10 +124,12 @@ func (m *Module) Close(context.Context) error {
 }
 
 // serve runs h under the resource lock: shared, or exclusive for an
-// operation that writes an identity or a template. An operation is
-// authorized on the identities and templates it looks up, and then acts on
-// them; holding the lock from one to the other keeps a concurrent create or
-// delete from making it act on a resource other than the one evaluated.
+// operation that writes an identity, an identity's policy or a template. An
+// operation is authorized on the identities and templates it looks up, with
+// the policies of the identities it sends from, and then acts on them;
+// holding the lock from one to the other keeps a concurrent create, update
+// or delete from making it act on a resource other than the one evaluated,
+// or under policies other than the ones evaluated.
 // Nothing changes a resource's tags, so they cannot go stale in between.
 func (m *Module) serve(h handler, writes bool) func(gas.Context) error {
 	return func(ctx gas.Context) error {

@@ -62,6 +62,12 @@ type GetEmailIdentityResponse struct {
 	VerifiedForSendingStatus bool              `json:"VerifiedForSendingStatus"`
 }
 
+// GetEmailIdentityPoliciesResponse is the body GetEmailIdentityPolicies
+// answers with: each policy's document by its name.
+type GetEmailIdentityPoliciesResponse struct {
+	Policies map[string]string `json:"Policies"`
+}
+
 // ResponseTag is a resource tag in a response, where both members are
 // always present.
 type ResponseTag struct {

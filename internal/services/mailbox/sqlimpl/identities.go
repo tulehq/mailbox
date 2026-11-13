@@ -76,9 +76,17 @@ func (s *Service) GetIdentity(ctx context.Context, name string) (*contracts.Iden
 			return fmt.Errorf("query: %w", err)
 		}
 		out = &r.item
-		return nil
+		out.Policies, err = queryAll(ctx, tx, scanPolicy,
+			`SELECT name, document FROM identity_policies WHERE identity = ? ORDER BY name`,
+			name)
+		return err
 	})
 	return out, err
+}
+
+func scanPolicy(r scanner) (contracts.IdentityPolicy, error) {
+	var p contracts.IdentityPolicy
+	return p, r.Scan(&p.Name, &p.Document)
 }
 
 // ListIdentities pages through the identities matching f in creation order.
@@ -107,12 +115,94 @@ func (s *Service) ListIdentities(
 	return out, err
 }
 
-// DeleteIdentity deletes the identity with the given name.
+// DeleteIdentity deletes the identity with the given name, and its
+// policies.
 func (s *Service) DeleteIdentity(ctx context.Context, name string) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
-		return deleteOne(ctx, tx, `DELETE FROM identities WHERE name = ?`, name,
-			contracts.ErrIdentityNotFound)
+		if err := deleteOne(ctx, tx, `DELETE FROM identities WHERE name = ?`, name,
+			contracts.ErrIdentityNotFound); err != nil {
+			return err
+		}
+		_, err := exec(ctx, tx, `DELETE FROM identity_policies WHERE identity = ?`, name)
+		return err
 	})
+}
+
+// CreateIdentityPolicy adds a policy to an identity that exists, has no
+// policy of the name and fewer than contracts.MaxIdentityPolicies.
+func (s *Service) CreateIdentityPolicy(
+	ctx context.Context,
+	identity string,
+	p contracts.IdentityPolicy,
+) error {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		if err := identityExists(ctx, tx, identity); err != nil {
+			return err
+		}
+		taken, err := exists(ctx, tx,
+			`SELECT 1 FROM identity_policies WHERE identity = ? AND name = ? LIMIT 1`,
+			identity, p.Name)
+		if err != nil {
+			return err
+		}
+		if taken {
+			return contracts.ErrIdentityPolicyExists
+		}
+		n, err := count(ctx, tx, `SELECT count(*) FROM identity_policies WHERE identity = ?`,
+			identity)
+		if err != nil {
+			return err
+		}
+		if n >= contracts.MaxIdentityPolicies {
+			return contracts.ErrIdentityPolicyLimit
+		}
+		_, err = exec(ctx, tx,
+			`INSERT INTO identity_policies (identity, name, document) VALUES (?, ?, ?)`,
+			identity, p.Name, p.Document)
+		return err
+	})
+}
+
+// UpdateIdentityPolicy replaces the document of a policy the identity has.
+func (s *Service) UpdateIdentityPolicy(
+	ctx context.Context,
+	identity string,
+	p contracts.IdentityPolicy,
+) error {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		if err := identityExists(ctx, tx, identity); err != nil {
+			return err
+		}
+		_, err := exec(ctx, tx,
+			`UPDATE identity_policies SET document = ? WHERE identity = ? AND name = ?`,
+			p.Document, identity, p.Name)
+		return err
+	})
+}
+
+// DeleteIdentityPolicy deletes a policy of the identity, if it has one.
+func (s *Service) DeleteIdentityPolicy(ctx context.Context, identity, name string) error {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		if err := identityExists(ctx, tx, identity); err != nil {
+			return err
+		}
+		_, err := exec(ctx, tx,
+			`DELETE FROM identity_policies WHERE identity = ? AND name = ?`, identity, name)
+		return err
+	})
+}
+
+// identityExists is nil when the identity exists, else
+// contracts.ErrIdentityNotFound.
+func identityExists(ctx context.Context, tx *sql.Tx, name string) error {
+	found, err := exists(ctx, tx, `SELECT 1 FROM identities WHERE name = ? LIMIT 1`, name)
+	switch {
+	case err != nil:
+		return err
+	case !found:
+		return contracts.ErrIdentityNotFound
+	}
+	return nil
 }
 
 // deleteOne runs a DELETE of at most one row, failing with notFound when it

@@ -157,4 +157,21 @@ DROP TABLE identity_case_clash;
 UPDATE identities SET name = lower(name) WHERE type = 'DOMAIN' AND name <> lower(name);
 `,
 	},
+	{
+		// An identity's policies go with it: DeleteIdentity deletes them in
+		// the same transaction, as the tables have no foreign keys.
+		Version:     "0004",
+		Description: "store sending authorization policies",
+		Up: `
+CREATE TABLE identity_policies (
+	identity TEXT NOT NULL,
+	name     TEXT NOT NULL,
+	document TEXT NOT NULL,
+	PRIMARY KEY (identity, name)
+);
+`,
+		Down: `
+DROP TABLE identity_policies;
+`,
+	},
 }
