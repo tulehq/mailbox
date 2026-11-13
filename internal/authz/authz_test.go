@@ -180,7 +180,7 @@ func (h *harness) call(keyID string) (int, sesapi.Error) {
 	return res.StatusCode, e
 }
 
-// userID is the unique ID of the user userARN names.
+// userID is the unique ID of the IAM user userARN names.
 const userID = "AIDAEXAMPLEDEV00001"
 
 func user(policies ...json.RawMessage) sigv4.Principal {
