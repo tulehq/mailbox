@@ -16,6 +16,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"tule.dev/policy"
 	"tule.dev/sigv4"
 
 	"tule.dev/mailbox/internal/contracts"
@@ -168,8 +169,28 @@ func (h *harness) call(keyID string) (int, sesapi.Error) {
 	return res.StatusCode, e
 }
 
+// userID is the unique ID of the user userARN names.
+const userID = "AIDAEXAMPLEDEV00001"
+
 func user(policies ...json.RawMessage) sigv4.Principal {
-	return sigv4.Principal{AccountID: testAccount, ARN: userARN, Policies: policies}
+	return sigv4.Principal{
+		AccountID: testAccount, ARN: userARN, PrincipalARN: userARN, UserID: userID,
+		Type: sigv4.PrincipalTypeUser, Policies: policies,
+	}
+}
+
+// session is a principal of a session s1 of the role named by roleARN, of
+// the account, as identity reports one.
+func session(account, roleARN string, policies ...json.RawMessage) sigv4.Principal {
+	name := roleARN[strings.LastIndex(roleARN, "/")+1:]
+	return sigv4.Principal{
+		AccountID:    account,
+		ARN:          "arn:aws:sts::" + account + ":assumed-role/" + name + "/s1",
+		PrincipalARN: roleARN,
+		UserID:       "AROAEXAMPLEROLE00001:s1",
+		Type:         sigv4.PrincipalTypeAssumedRole,
+		Policies:     policies,
+	}
 }
 
 func sesARN(resource string) string {
@@ -443,27 +464,78 @@ func TestTheSenderIdentityIsCanonicalAndADenyIsNotSidestepped(t *testing.T) {
 	}
 }
 
-func TestPrincipalKeys(t *testing.T) {
-	for arn, want := range map[string]map[string]string{
-		"arn:aws:iam::123456789012:user/dev": {
-			"aws:PrincipalArn":  "arn:aws:iam::123456789012:user/dev",
-			"aws:PrincipalType": "User", "aws:username": "dev",
-		},
-		"arn:aws:iam::123456789012:user/team/a/dev": {
-			"aws:PrincipalArn":  "arn:aws:iam::123456789012:user/team/a/dev",
-			"aws:PrincipalType": "User", "aws:username": "dev",
-		},
-		"arn:aws:sts::123456789012:assumed-role/sender/s1": {
-			"aws:PrincipalArn":  "arn:aws:iam::123456789012:role/sender",
-			"aws:PrincipalType": "AssumedRole",
-		},
-		"arn:aws:iam::123456789012:root": {"aws:PrincipalArn": "arn:aws:iam::123456789012:root"},
-		"not-an-arn":                     nil,
-	} {
-		if got := principalKeys(arn); !reflect.DeepEqual(got, want) {
-			t.Errorf("%s: got %v, want %v", arn, got, want)
-		}
+func TestTheCallerIsThePrincipalsAttributes(t *testing.T) {
+	p := session(testAccount, "arn:aws:iam::"+testAccount+":role/mail/sender")
+	want := policy.Caller{
+		AccountID:    testAccount,
+		ARN:          "arn:aws:sts::" + testAccount + ":assumed-role/sender/s1",
+		PrincipalARN: "arn:aws:iam::" + testAccount + ":role/mail/sender",
+		UserID:       "AROAEXAMPLEROLE00001:s1",
+		Type:         policy.PrincipalTypeAssumedRole,
 	}
+	if got := callerOf(p); got != want {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+}
+
+func TestThePrincipalsKeysComeFromItsAttributes(t *testing.T) {
+	const roleARN = "arn:aws:iam::" + testAccount + ":role/mail/sender"
+	allow := `{"Effect":"Allow","Action":"ses:GetAccount","Resource":"*"}`
+	for _, tc := range []struct {
+		name, deny string
+		p          sigv4.Principal
+	}{
+		{
+			name: "aws:PrincipalArn with the role's path", p: session(testAccount, roleARN),
+			deny: `{"ArnLike":{"aws:PrincipalArn":"arn:aws:iam::*:role/mail/*"}}`,
+		},
+		{
+			name: "aws:userid", p: session(testAccount, roleARN),
+			deny: `{"StringLike":{"aws:userid":"AROAEXAMPLEROLE00001:*"}}`,
+		},
+		{
+			name: "aws:PrincipalType", p: user(),
+			deny: `{"StringEquals":{"aws:PrincipalType":"User"}}`,
+		},
+		{
+			name: "aws:username", p: user(),
+			deny: `{"StringEquals":{"aws:username":"dev"}}`,
+		},
+		{
+			name: "aws:PrincipalAccount", p: user(),
+			deny: `{"StringEquals":{"aws:PrincipalAccount":"` + testAccount + `"}}`,
+		},
+		{
+			name: "aws:PrincipalTag", p: func() sigv4.Principal {
+				p := user()
+				p.Tags = map[string]string{"Team": "web"}
+				return p
+			}(),
+			deny: `{"StringEquals":{"aws:PrincipalTag/team":"web"}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := tc.p
+			p.Policies = []json.RawMessage{doc(allow, `{"Effect":"Deny","Action":"*",`+
+				`"Resource":"*","Condition":`+tc.deny+`}`)}
+			h := newHarness(t, "GetAccount", keys{"KEY": p}, &store{})
+			h.skip = true
+			status, e := h.call("KEY")
+			requireDenied(t, status, e, "User: "+p.ARN+" is not authorized to perform: "+
+				"ses:GetAccount on resource: * with an explicit deny in an identity-based policy")
+		})
+	}
+}
+
+func TestASessionWhoseRoleWasDeletedIsDenied(t *testing.T) {
+	p := session(testAccount, "", doc(`{"Effect":"Allow","Action":"ses:*","Resource":"*"}`))
+	p.ARN = "arn:aws:sts::" + testAccount + ":assumed-role/gone/s1"
+	h := newHarness(t, "GetAccount", keys{"KEY": p}, &store{})
+	h.skip = true
+	status, e := h.call("KEY")
+	requireDenied(t, status, e, "User: "+p.ARN+" is not authorized to perform: "+
+		"ses:GetAccount on resource: * because no identity-based policy allows the "+
+		"ses:GetAccount action")
 }
 
 func TestGlobalKeys(t *testing.T) {
@@ -471,17 +543,16 @@ func TestGlobalKeys(t *testing.T) {
 	r.RemoteAddr = "192.0.2.7:4242"
 	r.TLS = &tls.ConnectionState{}
 	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.FixedZone("x", 3600))
-	got := globalKeys(r, user(), testRegion, now)
+	p := user()
+	p.Tags = map[string]string{"team": "mail"}
+	got := globalKeys(r, p, testRegion, now)
 	want := map[string][]string{
-		"aws:PrincipalAccount": {testAccount},
-		"aws:PrincipalArn":     {userARN},
-		"aws:PrincipalType":    {"User"},
-		"aws:username":         {"dev"},
-		"aws:CurrentTime":      {"2026-11-13T09:00:00Z"},
-		"aws:EpochTime":        {"1794560400"},
-		"aws:SecureTransport":  {"true"},
-		"aws:RequestedRegion":  {testRegion},
-		"aws:SourceIp":         {"192.0.2.7"},
+		"aws:PrincipalTag/team": {"mail"},
+		"aws:CurrentTime":       {"2026-11-13T09:00:00Z"},
+		"aws:EpochTime":         {"1794560400"},
+		"aws:SecureTransport":   {"true"},
+		"aws:RequestedRegion":   {testRegion},
+		"aws:SourceIp":          {"192.0.2.7"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v\nwant %v", got, want)
@@ -539,7 +610,7 @@ func TestTheContextIsCapped(t *testing.T) {
 }
 
 func TestPoliciesAreCachedByContentAndBounded(t *testing.T) {
-	c := newPolicyCache(2)
+	c := newPolicyCache(2, policy.ParseIdentity)
 	d1 := doc(`{"Effect":"Allow","Action":"ses:GetAccount","Resource":"*"}`)
 	d2 := doc(`{"Effect":"Allow","Action":"ses:SendEmail","Resource":"*"}`)
 	d3 := doc(`{"Effect":"Allow","Action":"ses:SendBulkEmail","Resource":"*"}`)
@@ -626,10 +697,10 @@ func TestARawFromHeaderIsAuthorizedAsASecondSender(t *testing.T) {
 	}
 }
 
-func TestAPrincipalOfAnotherAccountIsRefused(t *testing.T) {
+func TestAPrincipalOfAnotherAccountNeedsAResourcePolicy(t *testing.T) {
 	const otherARN = "arn:aws:sts::999999999999:assumed-role/admin/s1"
 	other := func(policies ...json.RawMessage) sigv4.Principal {
-		return sigv4.Principal{AccountID: "999999999999", ARN: otherARN, Policies: policies}
+		return session("999999999999", "arn:aws:iam::999999999999:role/admin", policies...)
 	}
 	message := func(reason, action, resource string) string {
 		return "User: " + otherARN + " is not authorized to perform: " + action +

@@ -16,15 +16,16 @@ import (
 // thousands of times.
 const maxCachedPolicies = 512
 
-// policyCache keeps parsed identity policies by the SHA-256 of their
-// document, the least recently used one dropped when it is full. A
-// *policy.Policy is immutable, so one is shared by every request that
-// carries its document.
+// policyCache keeps policies of one kind, parsed by parseDoc, by the
+// SHA-256 of their document, the least recently used one dropped when it is
+// full. A *policy.Policy is immutable, so one is shared by every request
+// that carries its document.
 type policyCache struct {
-	entries map[[sha256.Size]byte]*list.Element
-	order   *list.List
-	mu      sync.Mutex
-	max     int
+	entries  map[[sha256.Size]byte]*list.Element
+	order    *list.List
+	parseDoc func([]byte) (*policy.Policy, error)
+	mu       sync.Mutex
+	max      int
 }
 
 type cacheEntry struct {
@@ -32,24 +33,25 @@ type cacheEntry struct {
 	key    [sha256.Size]byte
 }
 
-func newPolicyCache(maxEntries int) *policyCache {
+func newPolicyCache(maxEntries int, parse func([]byte) (*policy.Policy, error)) *policyCache {
 	return &policyCache{
-		entries: make(map[[sha256.Size]byte]*list.Element),
-		order:   list.New(),
-		max:     maxEntries,
+		entries:  make(map[[sha256.Size]byte]*list.Element),
+		order:    list.New(),
+		parseDoc: parse,
+		max:      maxEntries,
 	}
 }
 
-// parse returns the parsed policies of the documents, in order. Identity
-// checked every document when it was stored, so a document that does not
-// parse is a fault, reported as an error rather than skipped: skipping a
-// policy could drop a Deny.
+// parse returns the parsed policies of the documents, in order. Each was
+// checked when it was stored, by identity or by mailbox, so a document that
+// does not parse is a fault, reported as an error rather than skipped:
+// skipping a policy could drop a Deny.
 func (c *policyCache) parse(docs []json.RawMessage) ([]*policy.Policy, error) {
 	out := make([]*policy.Policy, 0, len(docs))
 	for i, doc := range docs {
 		p, err := c.get(doc)
 		if err != nil {
-			return nil, fmt.Errorf("authz: parse identity policy %d: %w", i, err)
+			return nil, fmt.Errorf("authz: parse policy %d: %w", i, err)
 		}
 		out = append(out, p)
 	}
@@ -68,7 +70,7 @@ func (c *policyCache) get(doc []byte) (*policy.Policy, error) {
 	}
 	c.mu.Unlock()
 
-	p, err := policy.ParseIdentity(doc)
+	p, err := c.parseDoc(doc)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // parse wraps it with the policy's index
 	}

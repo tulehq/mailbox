@@ -264,12 +264,14 @@ func TestARoleSessionHasTheRolesPermissions(t *testing.T) {
 		PolicyName: aws.String("send"),
 		PolicyDocument: aws.String(policyDoc(
 			statement{Effect: "Allow", Action: []string{"ses:SendEmail"}, Resource: []string{"*"}},
-			// aws:PrincipalArn of a session is its role's ARN, without the
+			// aws:PrincipalArn of a session is its role's ARN, with the
 			// role's path.
 			statement{
 				Effect: "Allow", Action: []string{"tule:Inspect"}, Resource: []string{"*"},
 				Condition: map[string]map[string]any{
-					"ArnEquals": {"aws:PrincipalArn": "arn:aws:iam::" + account + ":role/sender"},
+					"ArnEquals": {
+						"aws:PrincipalArn": "arn:aws:iam::" + account + ":role/mail/sender",
+					},
 				},
 			},
 		)),
