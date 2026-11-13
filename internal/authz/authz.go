@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -90,6 +91,13 @@ type Target struct {
 	HeaderSenderDisplayName string
 	// Feedback is the bare FeedbackForwardingEmailAddress, if any.
 	Feedback string
+	// SenderIdentityName, HeaderSenderIdentityName and FeedbackIdentityName
+	// are the identities a send's sending authorization ARNs choose for
+	// Sender, HeaderSender and Feedback, as IdentityFromARN returns them;
+	// empty, the identity is the one the address resolves to.
+	SenderIdentityName       string
+	HeaderSenderIdentityName string
+	FeedbackIdentityName     string
 	// ConfigurationSet is the configuration set a send uses, if any.
 	ConfigurationSet string
 	// Template is the template a template operation names, or the stored
@@ -379,26 +387,8 @@ func (a *Authorizer) resolve(
 	switch r.Type {
 	case Service:
 		return resource{arn: base + "*"}, true, nil
-	case SenderIdentity:
-		if t.Sender == "" {
-			return resource{}, false, errors.New("a send without a sender")
-		}
-		res, err := a.senderIdentity(ctx, t.Sender, base+"identity/")
-		return res, true, err
-	case HeaderSenderIdentity:
-		if t.HeaderSender == "" {
-			return resource{}, false, nil
-		}
-		res, err := a.senderIdentity(ctx, t.HeaderSender, base+"identity/")
-		// The header's sender is evaluated as the From address.
-		res.keys = map[string][]string{
-			KeyFromAddress:     {t.HeaderSender},
-			KeyFromDisplayName: nil,
-		}
-		if t.HeaderSenderDisplayName != "" {
-			res.keys[KeyFromDisplayName] = []string{t.HeaderSenderDisplayName}
-		}
-		return res, true, err
+	case SenderIdentity, HeaderSenderIdentity, FeedbackIdentity:
+		return a.resolveSender(ctx, r.Type, t, base+"identity/")
 	case Identity:
 		return named(ctx, r, CanonicalIdentity(t.Identity), base+"identity/", a.identityTags)
 	case Template:
@@ -415,6 +405,44 @@ func (a *Authorizer) resolve(
 		return res, use, err
 	}
 	return resource{}, false, fmt.Errorf("unknown resource type %d", r.Type)
+}
+
+// resolveSender resolves the identity of one of a send's addresses: its
+// sender's, its raw From header's or its feedback address's, reporting
+// false for an optional one the send does not have.
+func (a *Authorizer) resolveSender(
+	ctx context.Context,
+	typ ResourceType,
+	t Target,
+	prefix string,
+) (resource, bool, error) {
+	switch typ {
+	case SenderIdentity:
+		if t.Sender == "" {
+			return resource{}, false, errors.New("a send without a sender")
+		}
+		res, err := a.senderIdentity(ctx, t.Sender, prefix, t.SenderIdentityName)
+		return res, true, err
+	case FeedbackIdentity:
+		if t.Feedback == "" {
+			return resource{}, false, nil
+		}
+		res, err := a.senderIdentity(ctx, t.Feedback, prefix, t.FeedbackIdentityName)
+		return res, true, err
+	}
+	if t.HeaderSender == "" {
+		return resource{}, false, nil
+	}
+	res, err := a.senderIdentity(ctx, t.HeaderSender, prefix, t.HeaderSenderIdentityName)
+	// The header's sender is evaluated as the From address.
+	res.keys = map[string][]string{
+		KeyFromAddress:     {t.HeaderSender},
+		KeyFromDisplayName: nil,
+	}
+	if t.HeaderSenderDisplayName != "" {
+		res.keys[KeyFromDisplayName] = []string{t.HeaderSenderDisplayName}
+	}
+	return res, true, err
 }
 
 // named resolves a resource the request names, its ARN prefix and the name,
@@ -470,6 +498,7 @@ func checkNames(t Target) error {
 	}{
 		{"EmailIdentity", t.Identity, identityMax},
 		{"FromEmailAddress", t.Sender, maxAddressLength},
+		{"FeedbackForwardingEmailAddress", t.Feedback, maxAddressLength},
 		{"the From header", t.HeaderSender, maxAddressLength},
 		{"ConfigurationSetName", t.ConfigurationSet, maxConfigurationSetLength},
 		{"TemplateName", t.Template, maxTemplateLength},
@@ -511,24 +540,40 @@ func noTags(context.Context, string) ([]contracts.Tag, error) {
 }
 
 // senderIdentity resolves the identity a send from the address goes
-// through, with prefix its ARN prefix: the first of SenderIdentityCandidates
-// that exists, with its tags and its sending authorization policies, all of
-// which the send is evaluated with. They are read with the identity, in one
+// through, with prefix its ARN prefix. With chosen, the name of the identity
+// a sending authorization ARN names (IdentityFromARN), it is that identity.
+// Otherwise it is the first of SenderIdentityCandidates that exists. Either
+// comes with its tags and its sending authorization policies, all of which
+// the send is evaluated with. They are read with the identity, in one
 // transaction, and the send holds the module's resource lock until it is
-// stored, so the policies evaluated are the identity's when it acts. The candidates before it, which do not exist,
-// are its denyAlso, so a Deny written for one of them still applies. When
-// none exists, as mailbox sends from any address, the send is evaluated on
-// the address's domain, the identity a SES account most often verifies,
-// and every other candidate is its denyAlso: a Deny on a parent domain is
-// not sidestepped through a subdomain no identity covers.
+// stored, so the policies evaluated are the identity's when it acts.
+//
+// The candidates before it are its denyAlso, so a Deny written for one of
+// them still applies. When none exists, as mailbox sends from any address,
+// the send is evaluated on the address's domain, the identity a SES account
+// most often verifies, and every other candidate is its denyAlso: a Deny on
+// a parent domain is not sidestepped through a subdomain no identity covers.
 func (a *Authorizer) senderIdentity(
 	ctx context.Context,
-	address, prefix string,
+	address, prefix, chosen string,
 ) (resource, error) {
 	candidates := SenderIdentityCandidates(address)
 	arns := make([]string, len(candidates))
 	for i, name := range candidates {
 		arns[i] = prefix + name
+	}
+	if chosen != "" {
+		i := slices.Index(candidates, chosen)
+		if i < 0 {
+			return resource{}, fmt.Errorf("authz: %s does not cover %s", chosen, address)
+		}
+		id, err := a.store.GetIdentity(ctx, chosen)
+		if err != nil {
+			// IdentityFromARN found it under the same lock: not finding it
+			// now is a fault.
+			return resource{}, fmt.Errorf("authz: identity %s: %w", chosen, err)
+		}
+		return a.identityResource(arns[i], id, arns[:i])
 	}
 	for i, name := range candidates {
 		id, err := a.store.GetIdentity(ctx, name)
@@ -538,20 +583,28 @@ func (a *Authorizer) senderIdentity(
 		case err != nil:
 			return resource{}, err
 		}
-		if err = checkStoredTags(arns[i], id.Tags); err != nil {
-			return resource{}, err
-		}
-		policies, err := a.identityPolicies(arns[i], id.Policies)
-		if err != nil {
-			return resource{}, err
-		}
-		return resource{
-			arn: arns[i], tags: id.Tags, denyAlso: arns[:i], policies: policies,
-		}, nil
+		return a.identityResource(arns[i], id, arns[:i])
 	}
 	primary := min(1, len(arns)-1)
 	others := append(append([]string(nil), arns[:primary]...), arns[primary+1:]...)
 	return resource{arn: arns[primary], denyAlso: others}, nil
+}
+
+// identityResource is the stored identity id, of ARN arn, as a resource a
+// send is evaluated on, with its tags and policies.
+func (a *Authorizer) identityResource(
+	arn string,
+	id *contracts.Identity,
+	denyAlso []string,
+) (resource, error) {
+	if err := checkStoredTags(arn, id.Tags); err != nil {
+		return resource{}, err
+	}
+	policies, err := a.identityPolicies(arn, id.Policies)
+	if err != nil {
+		return resource{}, err
+	}
+	return resource{arn: arn, tags: id.Tags, denyAlso: denyAlso, policies: policies}, nil
 }
 
 // identityPolicies parses an identity's stored sending authorization
@@ -573,41 +626,58 @@ func (a *Authorizer) identityPolicies(
 	return out, nil
 }
 
-// CheckIdentityARN checks a sending authorization ARN a send gives for the
-// address, which field names: FromEmailAddressIdentityArn, or a raw
-// message's X-SES-SOURCE-ARN, X-SES-FROM-ARN or
-// FeedbackForwardingEmailAddressIdentityArn. It must be an SES identity ARN
-// (BadRequestException otherwise) of the service's account and region, as
-// every identity mailbox holds is (NotFoundException otherwise, since SES
-// documents no answer), naming the identity a send from the address is
-// evaluated on (BadRequestException otherwise): the ARN tells SES whose
-// policies authorize the address, and here the identity the address resolves
-// to is the one whose policies do. It is checked for every caller, the root
-// included, before anything is evaluated.
-func (a *Authorizer) CheckIdentityARN(ctx context.Context, field, arn, address string) error {
+// IdentityFromARN returns the identity a sending authorization ARN a send
+// gives for the address chooses, by its canonical name. field names where
+// the ARN came from: FromEmailAddressIdentityArn,
+// FeedbackForwardingEmailAddressIdentityArn, or a raw message's
+// X-SES-SOURCE-ARN or X-SES-FROM-ARN. The ARN is "the ARN of the identity
+// that is associated with the sending authorization policy that permits you
+// to use the email address" (SES API v2 Reference, SendEmail), so it
+// chooses whose policies apply: the address's own identity, or one of its
+// parent domains' (SES's example names example.com for
+// sender@example.com). It must be an SES identity ARN (BadRequestException
+// otherwise) of the service's account and region, as every identity
+// mailbox holds is (NotFoundException otherwise, since SES documents no
+// answer), naming an identity that covers the address (BadRequestException
+// otherwise) and exists (NotFoundException otherwise). It is checked for
+// every caller, the root included, before anything is evaluated.
+func (a *Authorizer) IdentityFromARN(
+	ctx context.Context,
+	field, arn, address string,
+) (string, error) {
+	name, err := a.identityARNName(field, arn)
+	if err != nil {
+		return "", err
+	}
+	if len(address) > maxAddressLength {
+		return "", sesapi.ErrBadRequest(fmt.Sprintf("The address is longer than %d characters.",
+			maxAddressLength))
+	}
+	if !slices.Contains(SenderIdentityCandidates(address), name) {
+		return "", sesapi.ErrBadRequest(fmt.Sprintf("%s %s names an identity that does "+
+			"not cover %s.", field, arn, address))
+	}
+	if _, err = a.store.GetIdentity(ctx, name); err != nil {
+		if errors.Is(err, contracts.ErrIdentityNotFound) {
+			return "", sesapi.ErrNotFound(fmt.Sprintf("Email identity %s does not exist.", name))
+		}
+		return "", err
+	}
+	return name, nil
+}
+
+// identityARNName is the canonical name of the identity an SES identity ARN
+// of the service's account and region names, as IdentityFromARN describes.
+func (a *Authorizer) identityARNName(field, arn string) (string, error) {
 	parts := strings.SplitN(arn, ":", 6)
 	if len(parts) != 6 || parts[0] != "arn" || parts[2] != "ses" ||
 		!strings.HasPrefix(parts[5], "identity/") || parts[5] == "identity/" {
-		return sesapi.ErrBadRequest(fmt.Sprintf("Invalid %s: %s", field, arn))
+		return "", sesapi.ErrBadRequest(fmt.Sprintf("Invalid %s: %s", field, arn))
 	}
 	if !strings.HasPrefix(arn, a.ARNPrefix()) {
-		return sesapi.ErrNotFound(fmt.Sprintf("Email identity %s does not exist.", arn))
+		return "", sesapi.ErrNotFound(fmt.Sprintf("Email identity %s does not exist.", arn))
 	}
-	if len(address) > maxAddressLength {
-		return sesapi.ErrBadRequest(fmt.Sprintf("The address is longer than %d characters.",
-			maxAddressLength))
-	}
-	named := a.ARNPrefix() + "identity/" +
-		CanonicalIdentity(strings.TrimPrefix(parts[5], "identity/"))
-	res, err := a.senderIdentity(ctx, address, a.ARNPrefix()+"identity/")
-	if err != nil {
-		return err
-	}
-	if named != res.arn {
-		return sesapi.ErrBadRequest(fmt.Sprintf("%s %s does not name the identity %s "+
-			"sends from, %s.", field, arn, address, res.arn))
-	}
-	return nil
+	return CanonicalIdentity(strings.TrimPrefix(parts[5], "identity/")), nil
 }
 
 // CanonicalIdentity is the name an identity is known by: a domain in lower

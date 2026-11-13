@@ -44,6 +44,7 @@ var referenceTypes = map[ResourceType]string{
 	Identity:             "identity",
 	SenderIdentity:       "identity",
 	HeaderSenderIdentity: "identity",
+	FeedbackIdentity:     "identity",
 	ConfigurationSet:     "configuration-set",
 	Template:             "template",
 }

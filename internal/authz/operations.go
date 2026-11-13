@@ -12,18 +12,26 @@ type ResourceType int
 const (
 	// Identity is the identity the request names: Target.Identity.
 	Identity ResourceType = iota + 1
-	// SenderIdentity is the identity a send's From address sends through,
-	// found from Target.Sender as SenderIdentityName describes.
+	// SenderIdentity is the identity a send's From address sends through:
+	// the one Target.SenderIdentityName names, or else the first of
+	// SenderIdentityCandidates for Target.Sender that exists.
 	SenderIdentity
 	// HeaderSenderIdentity is the identity of a raw message's From header
 	// when the request also gives FromEmailAddress, found from
 	// Target.HeaderSender as for SenderIdentity.
 	HeaderSenderIdentity
 	// ConfigurationSet is the configuration set a send uses,
-	// Target.ConfigurationSet.
+	// Target.ConfigurationSet, of the caller's account: a principal of the
+	// service's account uses the service's, one of another account its own.
 	ConfigurationSet
 	// Template is the template the request names, Target.Template.
 	Template
+	// FeedbackIdentity is the identity of a send's feedback forwarding
+	// address, Target.Feedback, found as SenderIdentity is, with
+	// Target.FeedbackIdentityName. A sending authorization policy permits
+	// the use of the address (SES API v2 Reference, SendEmail,
+	// FeedbackForwardingEmailAddressIdentityArn).
+	FeedbackIdentity
 	// Service is the whole service in the caller's account and region,
 	// arn:aws:ses:<region>:<account>:*, which the retrieval API's
 	// tule:Inspect is evaluated on.
@@ -103,6 +111,7 @@ func (op *Operation) upfront() bool {
 var (
 	sendResources = []Resource{
 		{Type: SenderIdentity},
+		{Type: FeedbackIdentity, Optional: true},
 		{Type: ConfigurationSet, Optional: true},
 		{Type: Template, Optional: true},
 	}
@@ -110,6 +119,7 @@ var (
 	sendEmailResources = []Resource{
 		{Type: SenderIdentity},
 		{Type: HeaderSenderIdentity, Optional: true},
+		{Type: FeedbackIdentity, Optional: true},
 		{Type: ConfigurationSet, Optional: true},
 		{Type: Template, Optional: true},
 	}
@@ -124,9 +134,10 @@ var (
 // v1.5, a copy of which is in testdata); a test holds every route to an
 // entry here and every entry to the reference.
 //
-// SendEmail is evaluated on the identity it sends from, and on the
-// configuration set and the stored template it uses when it uses them, as
-// the reference lists all three for it. Raw content with a From header and
+// SendEmail is evaluated on the identity it sends from, on its feedback
+// forwarding address's identity when it has one, and on the configuration
+// set and the stored template it uses when it uses them, as the reference
+// lists all three types for it. Raw content with a From header and
 // a FromEmailAddress has two senders, and is evaluated on both identities:
 // SES authorizes the "From" address in the header of a raw message apart
 // from the envelope's Source (SendRawEmail API reference, FromArn). SendBulkEmail is too: its

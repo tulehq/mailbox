@@ -22,8 +22,8 @@ import (
 // message's From header when the request gives FromEmailAddress as well: a
 // second sender the send is authorized for. The ARNs are the sending
 // authorization identities the send names for its sender, its From header
-// and its feedback address, each to be checked against the identity of
-// that address (authz.CheckIdentityARN).
+// and its feedback address, each choosing the identity of that address the
+// send is evaluated on (authz.IdentityFromARN).
 type envelope struct {
 	headerFrom      *mail.Address
 	fromARNs        []identityARN
@@ -66,26 +66,43 @@ func identityARNs(env *envelope, from, feedback *string) error {
 	return nil
 }
 
-// checkIdentityARNs checks each sending authorization ARN of env against the
-// identity of its address, before the send is authorized.
-func (m *Module) checkIdentityARNs(ctx gas.Context, env envelope) error {
-	for _, a := range env.fromARNs {
-		if err := m.authz.CheckIdentityARN(ctx, a.field, a.arn, env.fromAddress); err != nil {
+// chooseIdentities sets the identities env's sending authorization ARNs
+// choose for its sender, its From header and its feedback address in t,
+// before the send is authorized.
+func (m *Module) chooseIdentities(ctx gas.Context, env envelope, t *authz.Target) error {
+	var err error
+	if t.SenderIdentityName, err = m.chosen(ctx, env.fromARNs, env.fromAddress); err != nil {
+		return err
+	}
+	if env.headerFrom != nil {
+		if t.HeaderSenderIdentityName, err = m.chosen(ctx, env.headerFromARNs,
+			env.headerFrom.Address); err != nil {
 			return err
 		}
 	}
-	if env.headerFrom != nil {
-		for _, a := range env.headerFromARNs {
-			if err := m.authz.CheckIdentityARN(ctx, a.field, a.arn,
-				env.headerFrom.Address); err != nil {
-				return err
-			}
-		}
-	}
 	if a := env.feedbackARN; a != nil {
-		return m.authz.CheckIdentityARN(ctx, a.field, a.arn, env.feedbackAddress)
+		t.FeedbackIdentityName, err = m.chosen(ctx, []identityARN{*a}, env.feedbackAddress)
 	}
-	return nil
+	return err
+}
+
+// chosen is the identity the ARNs given for the address choose, "" for none.
+// A raw message's two headers can both name the sender's identity; they must
+// name the same one.
+func (m *Module) chosen(ctx gas.Context, arns []identityARN, address string) (string, error) {
+	name := ""
+	for i, a := range arns {
+		n, err := m.authz.IdentityFromARN(ctx, a.field, a.arn, address)
+		if err != nil {
+			return "", err
+		}
+		if i > 0 && n != name {
+			return "", sesapi.ErrBadRequest(fmt.Sprintf("%s and %s name different "+
+				"identities for %s.", arns[0].field, a.field, address))
+		}
+		name = n
+	}
+	return name, nil
 }
 
 // envelopeOf checks the sender, reply-to and feedback addresses, and the
@@ -308,7 +325,7 @@ func (m *Module) authorizeSend(
 	if env.headerFrom != nil {
 		t.HeaderSender, t.HeaderSenderDisplayName = env.headerFrom.Address, env.headerFrom.Name
 	}
-	if err := m.checkIdentityARNs(ctx, env); err != nil {
+	if err := m.chooseIdentities(ctx, env, &t); err != nil {
 		return err
 	}
 	return m.authz.Authorize(ctx, t)

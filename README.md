@@ -161,8 +161,8 @@ holds every route to an entry and every entry to the reference.
 
 | Operation | Action | Evaluated on |
 |---|---|---|
-| `SendEmail` | `ses:SendEmail` | The sender's identity, and for `Raw` content with a `From` header and `FromEmailAddress` the header's identity too; the configuration set, when the request (or a raw message's `X-SES-CONFIGURATION-SET` header) names one; the stored template, for `Template` content that names one |
-| `SendBulkEmail` | `ses:SendBulkEmail` | The same three, from the request. They are shared by every entry, so a denial refuses the whole request, as `BulkEmailStatus` has no access-denied status |
+| `SendEmail` | `ses:SendEmail` | The sender's identity, and for `Raw` content with a `From` header and `FromEmailAddress` the header's identity too; the `FeedbackForwardingEmailAddress`'s identity, when it has one; the configuration set, when the request (or a raw message's `X-SES-CONFIGURATION-SET` header) names one; the stored template, for `Template` content that names one |
+| `SendBulkEmail` | `ses:SendBulkEmail` | The same, from the request. They are shared by every entry, so a denial refuses the whole request, as `BulkEmailStatus` has no access-denied status |
 | `CreateEmailIdentity` | `ses:CreateEmailIdentity`, and `ses:TagResource` when it has `Tags` | The new identity |
 | `GetEmailIdentity`, `DeleteEmailIdentity` | `ses:GetEmailIdentity`, `ses:DeleteEmailIdentity` | The identity |
 | `CreateEmailIdentityPolicy`, `GetEmailIdentityPolicies`, `UpdateEmailIdentityPolicy`, `DeleteEmailIdentityPolicy` | `ses:<Operation>` | The identity |
@@ -330,7 +330,7 @@ with it.
 **A send** is evaluated on the identity it sends from (above), with every
 policy that identity has, an email address identity's taking precedence over
 its domain's as SES documents, since the address identity is the one
-evaluated when it exists. A `Deny` in any policy denies, and an `Allow` in
+evaluated when it exists, unless the send's ARN chooses another (below). A `Deny` in any policy denies, and an `Allow` in
 any counts. A delegate sender in another account is allowed when its
 identity policy and one of the identity's policies both allow it; within the
 account the rules above apply. A send that uses a stored template is also
@@ -341,26 +341,42 @@ in the caller's account, `arn:aws:ses:<region>:<caller account>:configuration-se
 as a delegate sender uses its own configuration sets and SES "doesn't
 apply" the identity's to its mail.
 
-**The identity ARNs a send gives**, `FromEmailAddressIdentityArn` and
+**The feedback forwarding address** is evaluated the same way, on its own
+identity with that identity's policies, when a send gives one:
+`FeedbackForwardingEmailAddressIdentityArn` is "the ARN of the identity
+that is associated with the sending authorization policy that permits you
+to use the email address specified in the FeedbackForwardingEmailAddress
+parameter" (SendEmail reference). So a delegate needs a grant on the
+feedback address's identity as well as the sender's, and a principal of
+mailbox's account needs its identity policies to allow `ses:SendEmail` on
+that identity, as they must on the sender's.
+
+**The identity ARNs a send gives** choose the identity whose policies
+apply, as in SES, where the ARN is that of "the identity that is associated
+with the sending authorization policy that permits you to use the email
+address": `FromEmailAddressIdentityArn` and
 `FeedbackForwardingEmailAddressIdentityArn` (`SendEmail` and
-`SendBulkEmail`) and a raw message's `X-SES-SOURCE-ARN` and `X-SES-FROM-ARN`
-headers, are checked for every caller, the root included, before anything is
-evaluated: each must be an SES identity ARN (`BadRequestException`) of
-mailbox's account and region (`NotFoundException` otherwise, as every
-identity mailbox holds is there and SES documents no answer) naming the
-identity its address is evaluated on (`BadRequestException`). An ARN only
-confirms that identity: the identity whose policies apply is the one the
-address resolves to. `X-SES-SOURCE-ARN` is the sender's,
-`X-SES-FROM-ARN` the `From` header's (both the sender's when the request has
-no `FromEmailAddress`), and `FromEmailAddressIdentityArn` overrides both
-("For Raw emails, the FromEmailAddressIdentityArn value overrides the
-X-SES-SOURCE-ARN and X-SES-FROM-ARN headers", SendEmail reference). As in
-SES, only the first of a repeated header counts, and all three headers are
-removed. `X-SES-RETURN-PATH-ARN` is removed and not read.
-`FeedbackForwardingEmailAddressIdentityArn` needs a
-`FeedbackForwardingEmailAddress`. The feedback address's identity is not
-evaluated: a policy restricts it with `ses:FeedbackAddress`, the key the
-guide gives for "the Return Path address".
+`SendBulkEmail`), and a raw message's `X-SES-SOURCE-ARN` and
+`X-SES-FROM-ARN` headers. Each may name the address's own identity or any
+identity of a domain that covers it, its domain or a parent domain, so
+`identity/example.com` serves `sender@example.com` (SES's own example) even
+when `sender@example.com` has an identity of its own; that identity is then
+the one evaluated, with its policies. Without an ARN the address's most
+granular identity is (above). An ARN is checked for every caller, the root
+included, before anything is evaluated: it must be an SES identity ARN
+(`BadRequestException`) of mailbox's account and region (`NotFoundException`
+otherwise, as every identity mailbox holds is there and SES documents no
+answer), naming an identity that covers the address (`BadRequestException`
+otherwise) and exists (`NotFoundException`). `X-SES-SOURCE-ARN` is the
+sender's, `X-SES-FROM-ARN` the `From` header's (both the sender's when the
+request has no `FromEmailAddress`, when they must name the same identity),
+and `FromEmailAddressIdentityArn` overrides both ("For Raw emails, the
+FromEmailAddressIdentityArn value overrides the X-SES-SOURCE-ARN and
+X-SES-FROM-ARN headers", SendEmail reference). As in SES, only the first of
+a repeated header counts, and all three headers are removed.
+`X-SES-RETURN-PATH-ARN` is removed and not read: a raw message's feedback
+address is only the request's. `FeedbackForwardingEmailAddressIdentityArn`
+needs a `FeedbackForwardingEmailAddress`.
 
 The condition keys of a send (above) apply in these policies as in identity
 policies: `ses:FromAddress`, `ses:FromDisplayName`, `ses:Recipients`,
@@ -389,8 +405,8 @@ is supplied to both kinds of policy.
   no effect.
 - **A delegate sender needs no identity ARN.** In AWS a send from another
   account without the ARN looks the identity up in the sender's own account.
-  Here every identity is mailbox's account's, and a send is evaluated on the
-  identity its address resolves to, ARN or not.
+  Here every identity is mailbox's account's, and a send without an ARN is
+  evaluated on the most granular identity of its address.
 - **No permissions boundaries, session policies, SCPs or RCPs**, as in
   tule.dev/policy; where AWS lets them limit a grant to a role ARN, the grant
   here is unlimited.
@@ -867,8 +883,12 @@ file. Full-text search uses SQLite's FTS5, which the modernc build includes.
   of an older identity are refused.
 - **A send's configuration set is evaluated in the caller's account**, which
   for a principal of mailbox's account is the ARN it was before.
-- **The sending authorization ARNs are checked** rather than ignored: one
-  that does not name the identity its address sends from is refused.
+- **The sending authorization ARNs are honored** rather than ignored: each
+  chooses the identity its address is evaluated on, and one that does not
+  name an existing identity covering the address is refused.
+- **The feedback forwarding address's identity is evaluated.** A send with
+  `FeedbackForwardingEmailAddress` now also needs `ses:SendEmail` allowed
+  on that address's identity.
 - A migration adds the policy table on the first start; it can be rolled
   back.
 
