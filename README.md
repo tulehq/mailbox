@@ -59,7 +59,7 @@ Settings come from environment variables prefixed with `TULE_`, and from a
 | `TULE_Server_ShutdownTimeout` | `7s` | How long a graceful shutdown waits for in-flight requests |
 | `TULE_Auth_AccessKeyID` | required | The access key clients sign requests with |
 | `TULE_Auth_SecretAccessKey` | required | Its secret |
-| `TULE_Auth_IdentityEndpoint` | unset | The identity service's base URL, such as `http://localhost:9030`: an absolute http or https URL. Set, the keys identity issued are accepted as well as the configured key, held to their identity policies ([Permissions](#permissions)), and identity is asked about them with the configured key, which must be identity's root key. Identity 0.5.0 or later is required. Unset, mailbox runs standalone on the configured key alone |
+| `TULE_Auth_IdentityEndpoint` | unset | The identity service's base URL, such as `http://localhost:9030`: an absolute http or https URL. Set, the keys identity issued are accepted as well as the configured key, held to their identity policies ([Permissions](#permissions)), the principals of stored sending authorization policies are bound to unique IDs ([Sending authorization](#sending-authorization)), and identity is asked about them with the configured key, which must be identity's root key. Identity 0.5.0 or later is required. Unset, mailbox runs standalone on the configured key alone |
 | `TULE_Mailbox_AccountID` | `000000000000` | The account mailbox's resources belong to: 12 digits. The root key acts in it and the ARNs carry it; a principal of any other account needs an email identity's sending authorization policy as well as its own identity policy (see Sending authorization). The default is identity's default management account |
 | `TULE_Mailbox_Region` | `us-east-1` | The region the ARNs carry and `aws:RequestedRegion` is, whatever region a request was signed for |
 | `TULE_GasEnv` | | `development` logs console output at trace level, `production` logs at warn level, `testing` disables logging |
@@ -339,6 +339,43 @@ SES Developer Guide, "Policy anatomy"):
 Every action is accepted in a document, though only a send is evaluated
 with it.
 
+**Principals are bound to unique IDs** when a policy is stored, as AWS
+binds them ("If you delete the role, then you break the relationship. ...
+The new role has a new principal ID that does not match the ID stored in
+the policy", IAM User Guide, "AWS JSON policy elements: Principal"; the
+same holds for users and for resource-based policies). With an identity
+endpoint, `CreateEmailIdentityPolicy` and `UpdateEmailIdentityPolicy` ask
+identity (its principal-ID endpoint, `tule.dev/identity/principals`) for
+the unique ID of each IAM user and role ARN in the document's `Principal`
+and `NotPrincipal`, and store the document with each such ARN replaced by
+the `AIDA...` or `AROA...` ID of the IAM user or role that has it now; account
+IDs, root ARNs, session ARNs, `"*"`, service principals and ARNs in
+conditions are kept. A send is evaluated with the stored document, so a
+user or role deleted and created again under the same name is another
+principal, which the policy does not name, until the policy is saved again.
+The rest of the document is kept as it was sent, its members in their
+order, except the white space of an object in which an ID replaced an ARN.
+
+- **A user or role that does not exist** is refused with
+  `BadRequestException`, `Invalid policy: Invalid principal in policy:
+  "AWS":"<arn>"`, the error the SES v2 reference gives for invalid
+  input ("The input you provided is invalid."; SES documents no message, so
+  the wording is mailbox's choice). It is reported only once the request
+  is authorized: a caller that may not write the policy is denied whether or
+  not the principals it names exist.
+- **Reads show the policy as AWS shows it.** `GetEmailIdentityPolicies` and
+  `GetEmailIdentity` ask identity for the current ARN of each unique ID: one
+  whose user or role still exists is shown as its ARN, and one that no
+  longer exists as the ID, as AWS shows it "because AWS can no longer map
+  it back to a valid ARN".
+- **Identity is asked outside the resource lock**, before a write takes it
+  and after a read releases it, so a slow identity holds up no other
+  operation; a send never asks it. When identity cannot be asked, the write
+  fails with `500` `InternalFailure` and stores nothing, and the read fails
+  the same way; both are logged. Each call is bounded by 10 seconds.
+- **Standalone** (no identity endpoint) nothing is bound: a policy is stored
+  and returned as it was sent, and matched by ARN.
+
 **A send** is evaluated on the identity it sends from (above), with every
 policy that identity has, an email address identity's taking precedence over
 its domain's as SES documents, since the address identity is the one
@@ -409,12 +446,11 @@ is supplied to both kinds of policy.
 
 ### Gaps
 
-- **Principals match by ARN, not unique ID.** AWS converts a user or role
-  ARN in a stored resource-based policy to the principal's unique ID, so a
-  principal deleted and created again under the same name does not inherit
-  the grant. Here a recreated user or role does inherit it, until identity
-  can resolve unique IDs for the services. A session whose role was deleted
-  is denied.
+- **Policies stored before 0.4 are not bound.** They keep matching by
+  ARN, so a user or role deleted and created again under the same name
+  inherits their grants, until each is saved again
+  ([Upgrading from 0.3](#upgrading-from-03)). Standalone, every policy
+  matches by ARN.
 - **Service principals never match** a caller, nor do federated-user and
   `CanonicalUser` values: no Tule caller is one. A policy for a service
   principal, such as the guide's Amazon Cognito example, is stored and has
@@ -882,6 +918,17 @@ file. Full-text search uses SQLite's FTS5, which the modernc build includes.
 
 - **identity v0.5.0 or later** (signing-key version 4) is required: the keys
   of an older identity are refused.
+- **Sending authorization policies are bound to unique IDs** when they
+  are stored with an identity endpoint
+  ([Sending authorization](#sending-authorization)). A policy naming a user
+  or role that does not exist is now refused with `BadRequestException`,
+  and reads show a deleted principal's unique ID in place of its ARN. The
+  policies 0.3 stored are not bound on upgrade: they keep matching by ARN,
+  so a user or role deleted and created again under the same name inherits
+  their grants, until each is saved again. To bind them, read each with
+  `GetEmailIdentityPolicies` and write it back with
+  `UpdateEmailIdentityPolicy`; a policy naming a principal that no longer
+  exists is then refused, and must be corrected first.
 - **`aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are supplied.** A
   condition on them that never held, or a negated one that always did,
   now follows the principal's organization; a `Deny` written as "deny

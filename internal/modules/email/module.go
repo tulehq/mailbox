@@ -21,23 +21,26 @@ const moduleName = "tule/modules/email"
 
 // Module registers the SES routes and serves the operations behind them.
 type Module struct {
-	router *gas.Router
-	store  contracts.MailboxProvider
-	authz  *authz.Authorizer
-	now    func() time.Time
+	router     *gas.Router
+	store      contracts.MailboxProvider
+	authz      *authz.Authorizer
+	principals contracts.PrincipalBinder
+	now        func() time.Time
 	// resources orders the operations on identities and templates; see
 	// serve.
 	resources sync.RWMutex
 }
 
 // NewModule returns a Module serving from store, its requests authorized by
-// az. It registers its routes when the app initializes it.
+// az, the principals of the policies it stores bound by principals. It
+// registers its routes when the app initializes it.
 func NewModule(
 	router *gas.Router,
 	store contracts.MailboxProvider,
 	az *authz.Authorizer,
+	principals contracts.PrincipalBinder,
 ) *Module {
-	return &Module{router: router, store: store, authz: az, now: time.Now}
+	return &Module{router: router, store: store, authz: az, principals: principals, now: time.Now}
 }
 
 // Name identifies the module to gas.
@@ -45,31 +48,67 @@ func (m *Module) Name() string {
 	return moduleName
 }
 
-// handler serves one operation. Returning an error leaves the response to
-// serve, which renders it as an error document.
+// handler serves one operation, wholly under the resource lock. Returning
+// an error leaves the response to serve, which renders it as an error
+// document.
 type handler func(gas.Context) error
+
+// staged serves one operation in stages: what it does before the resource
+// lock and after it, and, inside locked, what it does under it. An
+// operation that calls identity does so outside the lock, so a slow
+// identity holds up no other operation. It returns errors as a handler
+// does.
+type staged func(ctx gas.Context, locked func(func() error) error) error
+
+// whole is h as a staged operation that runs wholly under the lock.
+func whole(h handler) staged {
+	return func(ctx gas.Context, locked func(func() error) error) error {
+		return locked(func() error { return h(ctx) })
+	}
+}
+
+// route is one of the module's routes and the operation it serves.
+type route struct {
+	h      staged
+	method string
+	path   string
+	// writes marks an operation that creates, changes or deletes an
+	// identity, an identity's policy or a template.
+	writes bool
+}
 
 // Init registers the module's routes, the paths and methods of the SES v2
 // API model, each guarded by its authorization entry.
 func (m *Module) Init(context.Context) error {
-	routes := []struct {
-		h      handler
-		method string
-		path   string
-		// writes marks an operation that creates, changes or deletes an
-		// identity, an identity's policy or a template.
-		writes bool
-	}{
-		{m.sendEmail, http.MethodPost, "/v2/email/outbound-emails", false},
-		{m.sendBulkEmail, http.MethodPost, "/v2/email/outbound-bulk-emails", false},
-		{m.createEmailIdentity, http.MethodPost, "/v2/email/identities", true},
+	for _, r := range m.routes() {
+		op, ok := authz.Lookup(r.method, r.path)
+		if !ok {
+			return fmt.Errorf("email: %s %s has no authorization entry", r.method, r.path)
+		}
+		m.router.Handle(m, r.method, r.path, m.serve(r.h, r.writes),
+			gas.MiddlewareFuncWithName("authz "+op.Name, m.authz.Guard(op)))
+	}
+	return nil
+}
+
+// routes are the module's routes.
+func (m *Module) routes() []route {
+	return []route{
+		{whole(m.sendEmail), http.MethodPost, "/v2/email/outbound-emails", false},
+		{whole(m.sendBulkEmail), http.MethodPost, "/v2/email/outbound-bulk-emails", false},
+		{whole(m.createEmailIdentity), http.MethodPost, "/v2/email/identities", true},
 		// The SDK model binds ListEmailIdentities to POST /list-identities
 		// with a body; the botocore model the AWS CLI reads still binds it to
 		// GET /identities with a query. Both are served.
-		{m.listEmailIdentities, http.MethodPost, "/v2/email/list-identities", false},
-		{m.listEmailIdentitiesByQuery, http.MethodGet, "/v2/email/identities", false},
+		{whole(m.listEmailIdentities), http.MethodPost, "/v2/email/list-identities", false},
+		{whole(m.listEmailIdentitiesByQuery), http.MethodGet, "/v2/email/identities", false},
 		{m.getEmailIdentity, http.MethodGet, "/v2/email/identities/{EmailIdentity}", false},
-		{m.deleteEmailIdentity, http.MethodDelete, "/v2/email/identities/{EmailIdentity}", true},
+		{
+			whole(m.deleteEmailIdentity),
+			http.MethodDelete,
+			"/v2/email/identities/{EmailIdentity}",
+			true,
+		},
 		{
 			m.createEmailIdentityPolicy,
 			http.MethodPost,
@@ -89,33 +128,29 @@ func (m *Module) Init(context.Context) error {
 			true,
 		},
 		{
-			m.deleteEmailIdentityPolicy,
+			whole(m.deleteEmailIdentityPolicy),
 			http.MethodDelete,
 			"/v2/email/identities/{EmailIdentity}/policies/{PolicyName}",
 			true,
 		},
-		{m.createEmailTemplate, http.MethodPost, "/v2/email/templates", true},
-		{m.listEmailTemplates, http.MethodGet, "/v2/email/templates", false},
-		{m.getEmailTemplate, http.MethodGet, "/v2/email/templates/{TemplateName}", false},
-		{m.updateEmailTemplate, http.MethodPut, "/v2/email/templates/{TemplateName}", true},
-		{m.deleteEmailTemplate, http.MethodDelete, "/v2/email/templates/{TemplateName}", true},
+		{whole(m.createEmailTemplate), http.MethodPost, "/v2/email/templates", true},
+		{whole(m.listEmailTemplates), http.MethodGet, "/v2/email/templates", false},
+		{whole(m.getEmailTemplate), http.MethodGet, "/v2/email/templates/{TemplateName}", false},
+		{whole(m.updateEmailTemplate), http.MethodPut, "/v2/email/templates/{TemplateName}", true},
 		{
-			m.testRenderEmailTemplate,
+			whole(m.deleteEmailTemplate),
+			http.MethodDelete,
+			"/v2/email/templates/{TemplateName}",
+			true,
+		},
+		{
+			whole(m.testRenderEmailTemplate),
 			http.MethodPost,
 			"/v2/email/templates/{TemplateName}/render",
 			false,
 		},
-		{m.getAccount, http.MethodGet, "/v2/email/account", false},
+		{whole(m.getAccount), http.MethodGet, "/v2/email/account", false},
 	}
-	for _, r := range routes {
-		op, ok := authz.Lookup(r.method, r.path)
-		if !ok {
-			return fmt.Errorf("email: %s %s has no authorization entry", r.method, r.path)
-		}
-		m.router.Handle(m, r.method, r.path, m.serve(r.h, r.writes),
-			gas.MiddlewareFuncWithName("authz "+op.Name, m.authz.Guard(op)))
-	}
-	return nil
 }
 
 // Close releases nothing; the module holds no resources of its own.
@@ -131,8 +166,10 @@ func (m *Module) Close(context.Context) error {
 // or delete from making it act on a resource other than the one evaluated,
 // or under policies other than the ones evaluated.
 // Nothing changes a resource's tags, so they cannot go stale in between.
-func (m *Module) serve(h handler, writes bool) func(gas.Context) error {
-	return func(ctx gas.Context) error {
+//
+// A staged operation takes the lock only for what it runs inside locked.
+func (m *Module) serve(h staged, writes bool) func(gas.Context) error {
+	locked := func(fn func() error) error {
 		if writes {
 			m.resources.Lock()
 			defer m.resources.Unlock()
@@ -140,7 +177,10 @@ func (m *Module) serve(h handler, writes bool) func(gas.Context) error {
 			m.resources.RLock()
 			defer m.resources.RUnlock()
 		}
-		if err := h(ctx); err != nil {
+		return fn()
+	}
+	return func(ctx gas.Context) error {
+		if err := h(ctx, locked); err != nil {
 			return sesapi.WriteError(ctx, err)
 		}
 		return nil

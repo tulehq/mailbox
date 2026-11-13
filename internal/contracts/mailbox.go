@@ -153,8 +153,26 @@ type Identity struct {
 	Policies         []IdentityPolicy
 }
 
+// PrincipalBinder binds the principals of a sending authorization policy
+// to unique IDs, as AWS does when it saves a resource-based policy, and
+// shows a bound policy as AWS shows it. With identity it is identity's
+// principals client (tule.dev/identity/principals); standalone it returns
+// every document unchanged.
+type PrincipalBinder interface {
+	// Bind returns doc with each IAM user and role ARN in its Principal
+	// and NotPrincipal replaced by the unique ID of the IAM user or role that
+	// has it now. An ARN no user or role has is an error matching
+	// principals.ErrInvalidPrincipal.
+	Bind(ctx context.Context, doc string) (string, error)
+	// Show returns a bound doc with each unique ID a user or role still
+	// has replaced by its current ARN; one no user or role has stays the
+	// ID.
+	Show(ctx context.Context, doc string) (string, error)
+}
+
 // IdentityPolicy is one of an identity's sending authorization policies: a
-// resource-based policy document, by name.
+// resource-based policy document, by name. The document is stored as
+// PrincipalBinder.Bind returned it.
 type IdentityPolicy struct {
 	Name     string
 	Document string

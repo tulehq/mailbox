@@ -41,8 +41,13 @@ func New(cfg *Config, extra ...gas.Option) (*gas.App, error) {
 	opts := append([]gas.Option{gas.WithCSRFInsecureBypassPattern("/")}, extra...)
 	app := gas.NewApp(opts...)
 
+	binder, err := newPrincipals(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	registerInfraServices(app, cfg, logger)
-	registerAppServices(app, cfg)
+	registerAppServices(app, cfg, binder)
 	registerAppModules(app)
 
 	verifier, err := newVerifier(cfg)
@@ -85,8 +90,9 @@ func databaseConfig(store *sqlimpl.Settings) *database.Config {
 	return cfg
 }
 
-func registerAppServices(app *gas.App, cfg *Config) {
+func registerAppServices(app *gas.App, cfg *Config, binder contracts.PrincipalBinder) {
 	app.RegisterSingletonService[contracts.MailboxProvider](sqlimpl.NewService)
+	app.RegisterServiceInstance[contracts.PrincipalBinder](binder)
 	app.RegisterSingletonService[*authz.Authorizer](
 		func(store contracts.MailboxProvider) *authz.Authorizer {
 			return authz.New(store, cfg.Mailbox.AccountID, cfg.Mailbox.Region)
