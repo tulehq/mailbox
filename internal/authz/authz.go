@@ -258,7 +258,9 @@ func (a *Authorizer) requestKeys(
 
 // decide is nil when the caller's identity policies and the resource's
 // policies allow the action on the resource, else its AccessDeniedException.
-// An explicit Deny of any of the resource's denyAlso ARNs refuses it too.
+// An explicit Deny on any of the resource's denyAlso, in the identity
+// policies or in that one's own policies, with its tags, refuses it too;
+// their Allows do not count.
 func decide(
 	caller policy.Caller,
 	action string,
@@ -275,11 +277,14 @@ func decide(
 	}
 	az := authorize(req, res.policies, identity)
 	if az.Decision != policy.ExplicitDeny {
-		for _, arn := range res.denyAlso {
+		for _, other := range res.denyAlso {
 			also := req
-			also.Resource = arn
-			if d := authorize(also, nil, identity); d.Decision == policy.ExplicitDeny {
-				return sesapi.ErrAccessDenied(caller.ARN, action, arn, d.Reason.Message(action))
+			also.Resource = other.arn
+			also.Context = contextFor(keys, resource{keys: res.keys, tags: other.tags})
+			d := authorize(also, other.policies, identity)
+			if d.Decision == policy.ExplicitDeny {
+				return sesapi.ErrAccessDenied(caller.ARN, action, other.arn,
+					d.Reason.Message(action))
 			}
 		}
 	}
@@ -324,11 +329,13 @@ func authorize(
 }
 
 // resource is one resource a request is evaluated on: its ARN, and the tags
-// of what it names when that exists. denyAlso are ARNs an explicit Deny of
-// which refuses the request as well, though it is not evaluated on them for
-// an Allow: the sender identities that do not exist, which mailbox lets a
-// send go through regardless. keys replace the request's keys of the same
-// names for this resource, a nil value removing one.
+// of what it names when that exists. denyAlso are resources an explicit
+// Deny on which refuses the request as well, though it is not evaluated on
+// them for an Allow: the more specific sender identities a send does not go
+// through, those that do not exist, which mailbox lets a send go through
+// regardless, and those an ARN passed over for a less specific one. keys
+// replace the request's keys of the same names for this resource, a nil
+// value removing one.
 //
 // account is the ID of the account that owns the resource, and policies are
 // its resource-based policies, none for a resource that has none.
@@ -337,8 +344,26 @@ type resource struct {
 	arn      string
 	account  string
 	tags     []contracts.Tag
-	denyAlso []string
+	denyAlso []denyTarget
 	policies []*policy.Policy
+}
+
+// denyTarget is a resource only an explicit Deny is evaluated on: its ARN
+// and, for an identity that exists, its tags and sending authorization
+// policies.
+type denyTarget struct {
+	arn      string
+	tags     []contracts.Tag
+	policies []*policy.Policy
+}
+
+// denyTargets are ARNs of resources that do not exist, as deny targets.
+func denyTargets(arns []string) []denyTarget {
+	out := make([]denyTarget, len(arns))
+	for i, arn := range arns {
+		out[i] = denyTarget{arn: arn}
+	}
+	return out
 }
 
 // arnBase is the start of the ARNs of an account in a region:
@@ -549,7 +574,11 @@ func noTags(context.Context, string) ([]contracts.Tag, error) {
 // stored, so the policies evaluated are the identity's when it acts.
 //
 // The candidates before it are its denyAlso, so a Deny written for one of
-// them still applies. When none exists, as mailbox sends from any address,
+// them still applies. A chosen identity can pass over more specific ones
+// that exist, such as an address identity under the domain an ARN names:
+// their own policies' Deny statements apply too, with their tags. AWS does
+// not document whether it evaluates the policy of an identity an ARN passes
+// over; mailbox fails closed. When none exists, as mailbox sends from any address,
 // the send is evaluated on the address's domain, the identity a SES account
 // most often verifies, and every other candidate is its denyAlso: a Deny on
 // a parent domain is not sidestepped through a subdomain no identity covers.
@@ -573,7 +602,11 @@ func (a *Authorizer) senderIdentity(
 			// now is a fault.
 			return resource{}, fmt.Errorf("authz: identity %s: %w", chosen, err)
 		}
-		return a.identityResource(arns[i], id, arns[:i])
+		passed, err := a.passedOver(ctx, candidates[:i], arns[:i])
+		if err != nil {
+			return resource{}, err
+		}
+		return a.identityResource(arns[i], id, passed)
 	}
 	for i, name := range candidates {
 		id, err := a.store.GetIdentity(ctx, name)
@@ -583,11 +616,39 @@ func (a *Authorizer) senderIdentity(
 		case err != nil:
 			return resource{}, err
 		}
-		return a.identityResource(arns[i], id, arns[:i])
+		return a.identityResource(arns[i], id, denyTargets(arns[:i]))
 	}
 	primary := min(1, len(arns)-1)
 	others := append(append([]string(nil), arns[:primary]...), arns[primary+1:]...)
-	return resource{arn: arns[primary], denyAlso: others}, nil
+	return resource{arn: arns[primary], denyAlso: denyTargets(others)}, nil
+}
+
+// passedOver are the deny targets of the more specific candidates a chosen
+// identity passes over, of the ARNs: each that exists with its tags and
+// policies, each that does not with neither.
+func (a *Authorizer) passedOver(
+	ctx context.Context,
+	names, arns []string,
+) ([]denyTarget, error) {
+	out := make([]denyTarget, len(names))
+	for i, name := range names {
+		out[i] = denyTarget{arn: arns[i]}
+		id, err := a.store.GetIdentity(ctx, name)
+		switch {
+		case errors.Is(err, contracts.ErrIdentityNotFound):
+			continue
+		case err != nil:
+			return nil, err
+		}
+		if err = checkStoredTags(arns[i], id.Tags); err != nil {
+			return nil, err
+		}
+		if out[i].policies, err = a.identityPolicies(arns[i], id.Policies); err != nil {
+			return nil, err
+		}
+		out[i].tags = id.Tags
+	}
+	return out, nil
 }
 
 // identityResource is the stored identity id, of ARN arn, as a resource a
@@ -595,7 +656,7 @@ func (a *Authorizer) senderIdentity(
 func (a *Authorizer) identityResource(
 	arn string,
 	id *contracts.Identity,
-	denyAlso []string,
+	denyAlso []denyTarget,
 ) (resource, error) {
 	if err := checkStoredTags(arn, id.Tags); err != nil {
 		return resource{}, err

@@ -362,7 +362,17 @@ identity of a domain that covers it, its domain or a parent domain, so
 `identity/example.com` serves `sender@example.com` (SES's own example) even
 when `sender@example.com` has an identity of its own; that identity is then
 the one evaluated, with its policies. Without an ARN the address's most
-granular identity is (above). An ARN is checked for every caller, the root
+granular identity is (above). The more specific identities an ARN passes
+over still count for a `Deny`: an explicit `Deny` in the identity policies
+on any of them, or in the sending authorization policies of any of them
+that exists (evaluated with its tags), refuses the send with "... with an
+explicit deny in a resource-based policy" (or the identity-based
+message), while their `Allow`s do not count. So a `Deny` in
+`sender@example.com`'s own policy applies to a send through
+`identity/example.com`. AWS does not document whether it evaluates the
+policies of an identity the ARN passes over; this is mailbox's choice, to
+fail closed. The feedback address's identity is chosen and checked the same
+way. An ARN is checked for every caller, the root
 included, before anything is evaluated: it must be an SES identity ARN
 (`BadRequestException`) of mailbox's account and region (`NotFoundException`
 otherwise, as every identity mailbox holds is there and SES documents no
