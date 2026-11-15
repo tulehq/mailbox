@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,11 +26,11 @@ import (
 	"tule.dev/mailbox/internal/app"
 )
 
-// server is the app under test, served by the app's own *http.Server over a
-// real TCP listener: the listener is created here because gas.App.Serve
-// exposes neither the listener nor its port, and everything else is the
-// server gas built from the bound configuration, reached over the network
-// and shut down through gas.App.Stop.
+// server is the app under test, served by gas.App.ServeListener over a real
+// TCP listener: the listener is bound here, on a free port, so no port is
+// picked and released, and everything else is the server gas built from the
+// bound configuration, served through gas's lifecycle, reached over the
+// network and shut down through gas.App.Stop.
 type server struct {
 	app      *gas.App
 	listener net.Listener
@@ -99,7 +100,11 @@ func setEnv(t *testing.T, env map[string]string) {
 	}
 }
 
-// serve puts the app's own server on a loopback listener on a free port.
+// serve serves the app, through gas.App.ServeListener, on a loopback
+// listener on a free port, and returns once gas reports it listening
+// (gas.SystemServerListening). A Stop before ServeListener has begun would
+// make it return gas.ErrShutDown, so a test that stops the server at once
+// must not race it.
 func serve(t *testing.T, a *gas.App) *server {
 	t.Helper()
 
@@ -117,10 +122,22 @@ func serve(t *testing.T, a *gas.App) *server {
 		URL:      "http://" + listener.Addr().String(),
 	}
 
+	listening := make(chan struct{})
+	var once sync.Once
+	a.EventBus().Subscribe[gas.SystemServerListening](func(gas.SystemServerListeningPayload) {
+		once.Do(func() { close(listening) })
+	})
 	go func() {
-		srv.served <- a.Server().Serve(listener)
+		srv.served <- a.ServeListener(listener)
 	}()
 
+	select {
+	case <-listening:
+	case err := <-srv.served:
+		t.Fatalf("serve: %v (stop: %v)", err, a.Stop(context.Background()))
+	case <-time.After(clientTimeout):
+		t.Fatalf("not listening within %v (stop: %v)", clientTimeout, a.Stop(context.Background()))
+	}
 	return srv
 }
 
@@ -151,7 +168,7 @@ func (s *server) Stop(t *testing.T) {
 
 	select {
 	case err := <-s.served:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err != nil {
 			t.Errorf("serve: %v", err)
 		}
 	case <-time.After(clientTimeout):

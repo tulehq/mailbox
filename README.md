@@ -917,6 +917,13 @@ file. Full-text search uses SQLite's FTS5, which the modernc build includes.
   trusted, since nothing is expected in front of this service and the header
   is unsigned.
 
+## Upgrading from 0.4
+
+- **The `server started` log is written once the port is bound**, and its
+  `addr` is the bound address (such as `[::]:9040`) where it was the
+  configured one (`:9040`); it also has a `tls` field. A port that cannot
+  be bound is no longer logged as started (gas v0.10.0).
+
 ## Upgrading from 0.3
 
 - **identity v0.5.0 or later** (signing-key version 4) is required: the keys

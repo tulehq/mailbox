@@ -10,12 +10,12 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.79.9
 	github.com/aws/aws-sdk-go-v2/service/sts v1.52.0
 	github.com/aws/smithy-go v1.28.9
-	github.com/gasmod/gas v0.9.0
-	github.com/gasmod/gas/config v0.9.0
-	github.com/gasmod/gas/database v0.9.0
-	github.com/gasmod/gas/email v0.9.0
-	github.com/gasmod/gas/log v0.9.0
-	github.com/gasmod/gas/migrate v0.9.0
+	github.com/gasmod/gas v0.10.0
+	github.com/gasmod/gas/config v0.10.0
+	github.com/gasmod/gas/database v0.10.0
+	github.com/gasmod/gas/email v0.10.0
+	github.com/gasmod/gas/log v0.10.0
+	github.com/gasmod/gas/migrate v0.10.0
 	github.com/go-chi/chi/v5 v5.5.1-0.20261018135022-9f8adb1aabaa
 	github.com/mailgun/raymond/v2 v2.0.48
 	github.com/rs/zerolog v1.35.1
